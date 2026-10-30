@@ -1,0 +1,4 @@
+/thevault
+*.db
+*.db-wal
+*.db-shm
