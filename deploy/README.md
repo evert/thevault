@@ -1,6 +1,7 @@
 # Deploying The Vault
 
 The game is one static binary plus a SQLite file that every player writes to.
+Players run `thevault` for the full-screen game; the login hook runs `thevault motd`.
 There's no daemon and no cron job: the daily 3 AM ET (Toronto) tick runs inside
 whichever command first notices the boundary has passed.
 
@@ -40,7 +41,8 @@ which save file a binary uses.
 
 ```sh
 make build
-USER=alice ./thevault go e                        # play as anyone
+USER=alice ./thevault                             # play as anyone
+USER=bob ./thevault                               # ...in a second terminal, to test live co-op
 THEVAULT_NOW=2026-10-30T09:00:00-04:00 ./thevault motd   # pretend it's this time
 ```
 

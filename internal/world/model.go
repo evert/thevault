@@ -3,92 +3,146 @@ package world
 
 import (
 	"maps"
+	"math/rand/v2"
 	"slices"
+	"strings"
 	"time"
+	"unicode"
 )
 
 const (
-	GridW        = 7 // rooms per depth live on a GridW x GridH grid
-	GridH        = 3
-	Depths       = 5
-	MaxHP        = 3
-	TurnsPerTick = 3
-	MaxTurns     = 6
-	NoteMaxLen   = 140
+	FloorW = 5 // each floor is a FloorW x FloorH grid of rooms
+	FloorH = 3
+	Floors = 5
+	RoomW  = 21 // each room is a RoomW x RoomH grid of tiles, walls included
+	RoomH  = 9
+
+	EnergyPerTick = 100
+	MaxEnergy     = 200
+	StepCost      = 1
+	AttackCost    = 3
+	DefendCost    = 2
+	PackageCost   = 1
+
+	AllyBonus = 0.25 // extra damage per other player in the same fight
+)
+
+// Tiles.
+const (
+	Wall      = '#'
+	Floor     = '.'
+	Door      = 'D'
+	StairDown = '>'
+	StairUp   = '<'
 )
 
 // Room kinds.
 const (
 	Plain    = ""
-	Entrance = "entrance" // stairs up; on depth 1 this is camp
-	Stairs   = "stairs"   // stairs down; on the last depth, the Deep Gate
-	Tarball  = "tarball"  // sealed; opened with two keys or two people
+	Entrance = "entrance" // stairs up (none on floor 1)
+	Stairs   = "stairs"   // stairs down; on the last floor, the boss's lair
 )
 
-// Door kinds.
+// Package kinds.
 const (
-	Open   = "open"
-	Locked = "locked"
-	Plate  = "plate" // passable only while someone else stands in the plate room
+	Patch  = "patch"  // heal half your HP
+	Rimraf = "rimraf" // blast an enemy
+	Cache  = "cache"  // restore energy
 )
 
-// Item kinds.
-const (
-	Key   = "key"
-	Torch = "torch"
-	Rope  = "rope"
-	Relic = "relic" // shown as "the Lost Package"
-)
+var PackageKinds = []string{Patch, Rimraf, Cache}
 
 type Room struct {
-	Num       int // unique within a season, what players type
-	Depth     int
-	X, Y      int
-	Kind      string
-	Revealed  bool
-	Murk      bool
-	Source    bool // the Murk regrows from here
-	SafeUntil int  // tick until which the Murk can't enter (torch)
-	BoxOpen   bool
-	BoxKeys   int
-}
-
-type Door struct {
-	A, B     int // room numbers, A < B
+	Num      int // unique within a season
+	Floor    int
+	X, Y     int // position in the floor grid
 	Kind     string
-	Hidden   bool // needs a search to find
-	Revealed bool // shown on the map
-	Plate    int  // room number holding the plate, for Plate doors
+	Revealed bool
+	Tiles    [RoomH][RoomW]byte // generated from the seed, never stored
 }
 
-// Other returns the room on the far side of the door from num.
-func (d *Door) Other(num int) int {
+func (r *Room) At(x, y int) byte {
+	if x < 0 || y < 0 || x >= RoomW || y >= RoomH {
+		return Wall
+	}
+	return r.Tiles[y][x]
+}
+
+// Find returns the first tile of a type, or (-1, -1).
+func (r *Room) Find(t byte) (int, int) {
+	for y := range RoomH {
+		for x := range RoomW {
+			if r.Tiles[y][x] == t {
+				return x, y
+			}
+		}
+	}
+	return -1, -1
+}
+
+type DoorLink struct{ A, B int } // two adjacent rooms, A < B
+
+func (d DoorLink) Other(num int) int {
 	if d.A == num {
 		return d.B
 	}
 	return d.A
 }
 
-type Item struct {
-	ID     int // unique within a season
-	Kind   string
-	Room   int    // room it lies in (hidden, or inside the strongbox)
-	Holder string // player carrying it
-	Hidden bool
-	InBox  bool
+type Enemy struct {
+	ID      int
+	Room    int
+	X, Y    int
+	Name    string
+	Level   int
+	HP      int
+	MaxHP   int
+	Atk     int
+	Boss    bool
+	Hitters map[string]bool // everyone who landed a hit gets the XP
 }
 
-// Gone reports whether the item was used up.
-func (i *Item) Gone() bool { return i.Room == 0 && i.Holder == "" }
+type Item struct {
+	ID     int
+	Kind   string
+	Room   int // where it lies, when nobody holds it
+	X, Y   int
+	Holder string
+}
 
 type Player struct {
-	User   string
-	Room   int
-	HP     int
-	Turns  int
-	Downed bool
-	Joined time.Time
+	User     string
+	Color    int // 256-colour palette index
+	Room     int
+	X, Y     int
+	HP       int
+	Level    int
+	XP       int
+	Energy   int
+	Known    map[string]bool // enemy types fought: their levels show on your map
+	Battle   int             // enemy ID while in a fight
+	Braced   bool            // defended: the next attack hits 50% harder
+	KO       bool            // knocked out until the next tick
+	LastSeen time.Time
+	Joined   time.Time
 }
+
+// Letter is the player's map icon: the first letter of their name, uppercased.
+func (p *Player) Letter() string {
+	for _, r := range p.User {
+		if unicode.IsLetter(r) || unicode.IsDigit(r) {
+			return strings.ToUpper(string(r))
+		}
+	}
+	return "?"
+}
+
+func MaxHPFor(level int) int { return 20 + 5*(level-1) }
+func AtkFor(level int) int   { return 5 + 2*(level-1) }
+func XPToNext(level int) int { return 10 * level }
+
+func (p *Player) MaxHP() int { return MaxHPFor(p.Level) }
+func (p *Player) Atk() int   { return AtkFor(p.Level) }
 
 type Season struct {
 	ID        int
@@ -100,18 +154,12 @@ type Season struct {
 }
 
 type Event struct {
-	Tick int
-	At   time.Time
-	User string
-	Kind string
-	Text string
-}
-
-type Note struct {
-	Room int
-	User string
-	Text string
-	At   time.Time
+	Tick  int
+	At    time.Time
+	User  string
+	Kind  string
+	Text  string
+	Enemy int // set for battle log lines
 }
 
 // State is everything a command needs. It is loaded, changed in memory and
@@ -121,16 +169,17 @@ type State struct {
 	Tick     int       // number of ticks since the world began
 	LastTick time.Time // the boundary the last tick ran for
 	Now      time.Time
+	Rng      *rand.Rand
 
 	Rooms   []*Room // index = Num-1
-	Doors   []*Door
+	Doors   []DoorLink
+	Enemies []*Enemy
 	Items   []*Item
 	Players map[string]*Player
 
-	// Unsaved additions.
-	Events     []Event
-	Notes      []Note
-	FreshWorld bool // season rows need inserting rather than updating
+	EnemySeq   int     // last enemy ID handed out this season
+	Events     []Event // unsaved
+	FreshWorld bool    // the season row needs inserting
 }
 
 func (s *State) Room(num int) *Room {
@@ -140,60 +189,66 @@ func (s *State) Room(num int) *Room {
 	return s.Rooms[num-1]
 }
 
-func (s *State) DoorsOf(num int) []*Door {
-	var out []*Door
-	for _, d := range s.Doors {
-		if d.A == num || d.B == num {
-			out = append(out, d)
+func (s *State) RoomAt(floor, x, y int) *Room {
+	for _, r := range s.Rooms {
+		if r.Floor == floor && r.X == x && r.Y == y {
+			return r
 		}
 	}
-	return out
+	return nil
 }
 
-// DoorBetween returns the door joining two rooms, or nil.
-func (s *State) DoorBetween(a, b int) *Door {
+func (s *State) Linked(a, b int) bool {
 	if a > b {
 		a, b = b, a
 	}
-	for _, d := range s.Doors {
-		if d.A == a && d.B == b {
-			return d
-		}
-	}
-	return nil
+	return slices.Contains(s.Doors, DoorLink{a, b})
 }
 
-// RoomAt returns the room at grid cell (x, y) on a depth, or nil.
-func (s *State) RoomAt(depth, x, y int) *Room {
+func (s *State) FindKind(floor int, kind string) *Room {
 	for _, r := range s.Rooms {
-		if r.Depth == depth && r.X == x && r.Y == y {
+		if r.Floor == floor && r.Kind == kind {
 			return r
 		}
 	}
 	return nil
 }
 
-// FindKind returns the first room of a kind on a depth.
-func (s *State) FindKind(depth int, kind string) *Room {
+func (s *State) FloorRooms(floor int) []*Room {
+	var out []*Room
 	for _, r := range s.Rooms {
-		if r.Depth == depth && r.Kind == kind {
-			return r
-		}
-	}
-	return nil
-}
-
-func (s *State) Camp() *Room { return s.FindKind(1, Entrance) }
-
-// PlayersIn returns the players in a room, sorted by name.
-func (s *State) PlayersIn(num int) []*Player {
-	var out []*Player
-	for _, u := range s.Users() {
-		if p := s.Players[u]; p.Room == num {
-			out = append(out, p)
+		if r.Floor == floor {
+			out = append(out, r)
 		}
 	}
 	return out
+}
+
+func (s *State) Enemy(id int) *Enemy {
+	for _, e := range s.Enemies {
+		if e.ID == id {
+			return e
+		}
+	}
+	return nil
+}
+
+func (s *State) EnemyAt(room, x, y int) *Enemy {
+	for _, e := range s.Enemies {
+		if e.Room == room && e.X == x && e.Y == y {
+			return e
+		}
+	}
+	return nil
+}
+
+func (s *State) ItemAt(room, x, y int) *Item {
+	for _, it := range s.Items {
+		if it.Holder == "" && it.Room == room && it.X == x && it.Y == y {
+			return it
+		}
+	}
+	return nil
 }
 
 func (s *State) Held(user string) []*Item {
@@ -215,33 +270,67 @@ func (s *State) Holding(user, kind string) *Item {
 	return nil
 }
 
-// Users returns player names in sorted order.
-func (s *State) Users() []string {
-	return slices.Sorted(maps.Keys(s.Players))
+// RemoveItem deletes a used-up package.
+func (s *State) RemoveItem(it *Item) {
+	s.Items = slices.DeleteFunc(s.Items, func(o *Item) bool { return o == it })
 }
+
+func (s *State) RemoveEnemy(e *Enemy) {
+	s.Enemies = slices.DeleteFunc(s.Enemies, func(o *Enemy) bool { return o == e })
+}
+
+// Fighters returns the conscious players fighting an enemy, sorted by name.
+func (s *State) Fighters(enemy int) []*Player {
+	var out []*Player
+	for _, u := range s.Users() {
+		if p := s.Players[u]; p.Battle == enemy && !p.KO {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+func (s *State) PlayersIn(room int) []*Player {
+	var out []*Player
+	for _, u := range s.Users() {
+		if p := s.Players[u]; p.Room == room {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+func (s *State) Users() []string { return slices.Sorted(maps.Keys(s.Players)) }
 
 // Day is the day number within the current season, starting at 1.
 func (s *State) Day() int { return s.Tick - s.Season.StartTick + 1 }
 
 func (s *State) Won() bool { return s.Season.WonTick != 0 }
 
+// NextEnemyID never reuses an ID within a season, so fight logs stay separate.
+func (s *State) NextEnemyID() int {
+	s.EnemySeq++
+	return s.EnemySeq
+}
+
+func (s *State) NextItemID() int {
+	n := 0
+	for _, it := range s.Items {
+		n = max(n, it.ID)
+	}
+	return n + 1
+}
+
 func (s *State) Emit(user, kind, text string) {
 	s.Events = append(s.Events, Event{Tick: s.Tick, At: s.Now, User: user, Kind: kind, Text: text})
 }
 
-// Direction offsets on the grid.
-var Dirs = map[string][2]int{
-	"n": {0, -1}, "s": {0, 1}, "e": {1, 0}, "w": {-1, 0},
+// BattleLog adds a line to an enemy's fight log.
+func (s *State) BattleLog(enemy int, user, text string) {
+	s.Events = append(s.Events, Event{Tick: s.Tick, At: s.Now, User: user, Kind: "battle", Text: text, Enemy: enemy})
 }
 
-var DirNames = map[string]string{"n": "north", "s": "south", "e": "east", "w": "west"}
-
-// DirTo returns the direction letter from room a to adjacent room b.
-func DirTo(a, b *Room) string {
-	for k, v := range Dirs {
-		if a.X+v[0] == b.X && a.Y+v[1] == b.Y {
-			return k
-		}
-	}
-	return "?"
+// Dirs maps direction names to grid offsets.
+var Dirs = map[string][2]int{
+	"up": {0, -1}, "down": {0, 1}, "left": {-1, 0}, "right": {1, 0},
 }

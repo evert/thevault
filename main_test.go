@@ -9,16 +9,15 @@ import (
 	"testing"
 	"time"
 
-	"thevault/internal/game"
-	"thevault/internal/render"
 	"thevault/internal/store"
+	"thevault/internal/world"
 )
 
 // Ten people logging in at once after 3 AM must produce exactly one tick.
 func TestConcurrentLoginsTickOnce(t *testing.T) {
 	db := filepath.Join(t.TempDir(), "t.db")
 	t.Setenv("THEVAULT_NOW", "2026-10-29T14:00:00-04:00")
-	if err := run(db, "alice", nil, io.Discard, render.Style{}); err != nil {
+	if err := run(db, "alice", nil, io.Discard); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("THEVAULT_NOW", "2026-10-30T09:00:00-04:00")
@@ -28,7 +27,7 @@ func TestConcurrentLoginsTickOnce(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			if err := run(db, fmt.Sprintf("user%d", i), []string{"motd"}, io.Discard, render.Style{}); err != nil && !game.IsOops(err) {
+			if err := run(db, fmt.Sprintf("user%d", i), []string{"motd"}, io.Discard); err != nil {
 				errs <- err
 			}
 		}()
@@ -54,8 +53,8 @@ func TestConcurrentLoginsTickOnce(t *testing.T) {
 		if len(s.Players) != 11 {
 			t.Fatalf("players = %d, want 11", len(s.Players))
 		}
-		if p := s.Players["alice"]; p.Turns != 6 {
-			t.Fatalf("alice turns = %d, want 6 (3 + one refill)", p.Turns)
+		if p := s.Players["alice"]; p.Energy != 2*world.EnergyPerTick {
+			t.Fatalf("alice energy = %d, want %d (start + one refill)", p.Energy, 2*world.EnergyPerTick)
 		}
 		return nil
 	})

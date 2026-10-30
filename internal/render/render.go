@@ -1,4 +1,5 @@
-// Package render turns the world into terminal text.
+// Package render draws the world: room tiles, the floor minimap, bars, and
+// the plain-text outputs (MOTD, log, who). The TUI builds on these.
 package render
 
 import (
@@ -6,238 +7,311 @@ import (
 	"strings"
 	"time"
 
+	"github.com/charmbracelet/lipgloss"
+
 	"thevault/internal/clock"
-	"thevault/internal/game"
 	"thevault/internal/world"
 )
 
-// Style adds ANSI colour when enabled.
-type Style struct{ Color bool }
+func fg(c string) lipgloss.Style { return lipgloss.NewStyle().Foreground(lipgloss.Color(c)) }
 
-func (st Style) wrap(code, s string) string {
-	if !st.Color || s == "" {
-		return s
+var (
+	WallStyle    = fg("238")
+	FloorStyle   = fg("240")
+	DoorStyle    = fg("130")
+	StairStyle   = fg("255").Bold(true)
+	EnemyStyle   = fg("197").Bold(true)
+	PackageStyle = fg("220").Bold(true)
+	Dim          = fg("244")
+	Bold         = lipgloss.NewStyle().Bold(true)
+	HPStyle      = fg("203")
+	XPStyle      = fg("141")
+	EnergyStyle  = fg("214")
+	Title        = fg("214").Bold(true)
+)
+
+// PlayerStyle colours a player's letter. Your own letter gets a solid
+// background so you can always find yourself.
+func PlayerStyle(p *world.Player, me bool) lipgloss.Style {
+	st := lipgloss.NewStyle().Bold(true)
+	if me {
+		return st.Background(lipgloss.Color(fmt.Sprint(p.Color))).Foreground(lipgloss.Color("16"))
 	}
-	return "\x1b[" + code + "m" + s + "\x1b[0m"
+	return st.Foreground(lipgloss.Color(fmt.Sprint(p.Color)))
 }
 
-func (st Style) Bold(s string) string   { return st.wrap("1", s) }
-func (st Style) Dim(s string) string    { return st.wrap("2", s) }
-func (st Style) Murk(s string) string   { return st.wrap("35", s) }
-func (st Style) You(s string) string    { return st.wrap("1;33", s) }
-func (st Style) Good(s string) string   { return st.wrap("32", s) }
-func (st Style) Bad(s string) string    { return st.wrap("31", s) }
-func (st Style) Accent(s string) string { return st.wrap("36", s) }
-
-func Hearts(p *world.Player) string {
-	return strings.Repeat("♥", p.HP) + strings.Repeat("♡", world.MaxHP-p.HP)
+func PlayerTag(p *world.Player, me bool) string {
+	return PlayerStyle(p, me).Render(p.Letter())
 }
 
-func depthName(depth int) string {
-	return fmt.Sprintf("depth %d/%d", depth, world.Depths)
+// RoomLines draws a room, two terminal columns per tile. When the room is
+// bigger than w x h tiles, it shows a window centred on (cx, cy).
+func RoomLines(s *world.State, me *world.Player, rm *world.Room, cx, cy, w, h int) []string {
+	w, h = min(w, world.RoomW), min(h, world.RoomH)
+	x0 := clamp(cx-w/2, 0, world.RoomW-w)
+	y0 := clamp(cy-h/2, 0, world.RoomH-h)
+
+	people := map[[2]int]*world.Player{}
+	for _, p := range s.PlayersIn(rm.Num) {
+		k := [2]int{p.X, p.Y}
+		if people[k] == nil || p == me {
+			people[k] = p
+		}
+	}
+	lines := make([]string, 0, h)
+	for y := y0; y < y0+h; y++ {
+		var b strings.Builder
+		for x := x0; x < x0+w; x++ {
+			b.WriteString(tile(s, me, rm, people, x, y))
+		}
+		lines = append(lines, b.String())
+	}
+	return lines
 }
 
-func roomTitle(rm *world.Room) string {
+func tile(s *world.State, me *world.Player, rm *world.Room, people map[[2]int]*world.Player, x, y int) string {
+	if p := people[[2]int{x, y}]; p != nil {
+		return PlayerTag(p, p == me) + " "
+	}
+	if e := s.EnemyAt(rm.Num, x, y); e != nil {
+		return EnemyTile(e, me)
+	}
+	if s.ItemAt(rm.Num, x, y) != nil {
+		return PackageStyle.Render("*") + " "
+	}
+	switch rm.At(x, y) {
+	case world.Wall:
+		return WallStyle.Render("██")
+	case world.Door:
+		return DoorStyle.Render("░░")
+	case world.StairDown:
+		return StairStyle.Render(">") + " "
+	case world.StairUp:
+		return StairStyle.Render("<") + " "
+	}
+	return FloorStyle.Render("·") + " "
+}
+
+// EnemyTile shows an enemy's type icon, plus its level once you've fought
+// that type before.
+func EnemyTile(e *world.Enemy, me *world.Player) string {
+	glyph := EnemyGlyph(e)
+	if me == nil || !me.Known[e.Name] {
+		return glyph + " "
+	}
+	level := fmt.Sprint(e.Level)
+	if e.Level > 9 {
+		level = "+"
+	}
+	return glyph + Dim.Render(level)
+}
+
+func EnemyGlyph(e *world.Enemy) string {
+	t := world.TypeOf(e.Name)
+	return fg(fmt.Sprint(t.Color)).Bold(true).Render(t.Glyph)
+}
+
+func clamp(v, lo, hi int) int { return max(lo, min(hi, v)) }
+
+// Minimap draws a floor's explored rooms: one character per room, with
+// links between them. Players show as their letter.
+func Minimap(s *world.State, me *world.Player, floor int) []string {
+	var lines []string
+	for y := 0; y < world.FloorH; y++ {
+		var row, below strings.Builder
+		for x := 0; x < world.FloorW; x++ {
+			rm := s.RoomAt(floor, x, y)
+			row.WriteString(mapCell(s, me, rm))
+			if x < world.FloorW-1 {
+				east := s.RoomAt(floor, x+1, y)
+				row.WriteString(link(s, rm, east, "─"))
+			}
+			south := s.RoomAt(floor, x, y+1)
+			below.WriteString(link(s, rm, south, "│"))
+			if x < world.FloorW-1 {
+				below.WriteString(" ")
+			}
+		}
+		lines = append(lines, row.String())
+		if y < world.FloorH-1 {
+			lines = append(lines, below.String())
+		}
+	}
+	return lines
+}
+
+func link(s *world.State, a, b *world.Room, glyph string) string {
+	if a == nil || b == nil || !s.Linked(a.Num, b.Num) || !(a.Revealed || b.Revealed) {
+		return " "
+	}
+	return Dim.Render(glyph)
+}
+
+func mapCell(s *world.State, me *world.Player, rm *world.Room) string {
+	if rm == nil {
+		return " "
+	}
+	if !rm.Revealed {
+		// Show rooms you know a door leads to.
+		for _, d := range s.Doors {
+			if (d.A == rm.Num || d.B == rm.Num) && s.Room(d.Other(rm.Num)).Revealed {
+				return Dim.Render("?")
+			}
+		}
+		return " "
+	}
+	if me.Room == rm.Num {
+		return PlayerTag(me, true)
+	}
+	for _, p := range s.PlayersIn(rm.Num) {
+		return PlayerTag(p, false)
+	}
 	switch rm.Kind {
-	case world.Entrance:
-		if rm.Depth == 1 {
-			return "Camp"
-		}
-		return "Landing (stairs up)"
 	case world.Stairs:
-		if rm.Depth == world.Depths {
-			return "The Deep Gate"
-		}
-		return "Stairwell (stairs down)"
-	case world.Tarball:
-		return "Tarball chamber"
-	}
-	return "Passage"
-}
-
-// Status is the default screen: you, your room, and what to do.
-func Status(st Style, s *world.State, p *world.Player, notes []world.Note) string {
-	var b strings.Builder
-	rm := s.Room(p.Room)
-	fmt.Fprintf(&b, "%s · season %d, day %d · next turns in %s\n",
-		st.Bold("THE VAULT"), s.Season.ID, s.Day(), clock.Until(s.Now))
-	state := ""
-	if p.Downed {
-		state = st.Bad(" · DOWNED")
-	}
-	fmt.Fprintf(&b, "%s  %s  turns %s  room %d, %s%s\n", st.You(p.User), st.Bad(Hearts(p)),
-		st.Bold(fmt.Sprint(p.Turns)), rm.Num, depthName(rm.Depth), state)
-	fmt.Fprintf(&b, "packages: %s\n\n", packages(s, p))
-	b.WriteString(Look(st, s, p, notes))
-	return b.String()
-}
-
-func packages(s *world.State, p *world.Player) string {
-	var names []string
-	for _, it := range s.Held(p.User) {
-		names = append(names, game.PackageName(s, it))
-	}
-	if len(names) == 0 {
-		return "(none)"
-	}
-	return strings.Join(names, ", ")
-}
-
-// Look describes the current room.
-func Look(st Style, s *world.State, p *world.Player, notes []world.Note) string {
-	var b strings.Builder
-	rm := s.Room(p.Room)
-	fmt.Fprintf(&b, "%s %s\n", st.Bold(fmt.Sprintf("Room %d:", rm.Num)), roomTitle(rm))
-	if rm.Murk {
-		b.WriteString(st.Murk("  The Murk swirls here. Anyone still here at 3 AM takes damage.") + "\n")
-	}
-	switch rm.Kind {
-	case world.Tarball:
-		if rm.BoxOpen {
-			b.WriteString("  An unpacked tarball lies empty.\n")
-		} else {
-			fmt.Fprintf(&b, "  A sealed tarball, %d/2 keys turned. `open` it with two people, or `use key`.\n", rm.BoxKeys)
-		}
-	case world.Stairs:
-		if rm.Depth == world.Depths {
-			b.WriteString("  A vast gate. It wants the Lost Package. `descend` to pass.\n")
-		} else {
-			b.WriteString("  Stairs lead down. `descend` to go deeper.\n")
-		}
+		return StairStyle.Render(">")
 	case world.Entrance:
-		if rm.Depth > 1 {
-			b.WriteString("  Stairs lead up. `ascend` to go back.\n")
+		return StairStyle.Render("<")
+	}
+	return FloorStyle.Render("■")
+}
+
+// Bar draws a meter like ████░░░░.
+func Bar(cur, max, width int, st lipgloss.Style) string {
+	if max <= 0 {
+		max = 1
+	}
+	n := clamp(cur*width/max, 0, width)
+	if cur > 0 && n == 0 {
+		n = 1
+	}
+	return st.Render(strings.Repeat("█", n)) + Dim.Render(strings.Repeat("░", width-n))
+}
+
+// How newsworthy each event kind is, for the MOTD headline.
+var priority = map[string]int{
+	"won": 100, "boss": 90, "lair": 80, "floor": 70, "ko": 60, "level": 55,
+	"kill": 50, "wake": 30, "join": 20, "season": 15,
+}
+
+// Headline picks the most interesting recent event (events newest first;
+// the newest wins ties). It also returns how many others there were.
+func Headline(events []world.Event) (string, int) {
+	best, bestP := "", -1
+	for _, e := range events {
+		if p := priority[e.Kind]; p > bestP {
+			best, bestP = e.Text, p
 		}
 	}
-	for _, it := range s.Items {
-		if it.Hidden && it.Room == rm.Num {
-			b.WriteString(st.Accent("  Something glints in the rubble. Maybe `search`?") + "\n")
+	if best == "" {
+		return "The Vault is quiet. Too quiet.", 0
+	}
+	return best, len(events) - 1
+}
+
+// Motd shows the day's headline, your room, and your stats.
+func Motd(s *world.State, me *world.Player, events []world.Event) string {
+	var b strings.Builder
+	head, more := Headline(events)
+	extra := ""
+	if more > 0 {
+		extra = Dim.Render(fmt.Sprintf("  (+%d more: thevault log)", more))
+	}
+	fmt.Fprintf(&b, "%s %s %s%s\n", Title.Render("THE VAULT"), Dim.Render(fmt.Sprintf("day %d ·", s.Day())), head, extra)
+
+	rm := s.Room(me.Room)
+	room := RoomLines(s, me, rm, me.X, me.Y, world.RoomW, world.RoomH)
+	side := []string{
+		fmt.Sprintf("%s  %s", PlayerTag(me, true), Bold.Render(me.User)),
+		fmt.Sprintf("Lv %d · floor %d/%d", me.Level, rm.Floor, world.Floors),
+		HPStyle.Render("♥ ") + Bar(me.HP, me.MaxHP(), 10, HPStyle) + fmt.Sprintf(" %d/%d", me.HP, me.MaxHP()),
+		EnergyStyle.Render("⚡") + " " + Bar(me.Energy, world.MaxEnergy, 10, EnergyStyle) + fmt.Sprintf(" %d", me.Energy),
+		"",
+	}
+	switch {
+	case s.Won():
+		side = append(side, "Season won by "+s.Season.Winner+"!", "New season at 3 AM ET.")
+	case me.KO:
+		side = append(side, HPStyle.Render("Knocked out."), "Back at 3 AM ET.")
+	case me.Battle != 0:
+		side = append(side, EnemyStyle.Render("You're mid-fight!"), "Type "+Bold.Render("thevault")+" to play.")
+	default:
+		side = append(side, "Type "+Bold.Render("thevault")+" to play.")
+	}
+	for _, p := range s.PlayersIn(rm.Num) {
+		if p != me {
+			side = append(side, "", Dim.Render("Here: ")+PlayerTag(p, false)+" "+p.User)
 			break
 		}
 	}
-	for _, d := range s.Doors {
-		if d.Plate == rm.Num && d.Kind == world.Plate && d.Revealed {
-			fmt.Fprintf(&b, "  A pressure plate in the floor. Standing here holds open the door between %d and %d.\n", d.A, d.B)
+	for i, line := range room {
+		b.WriteString("  " + line)
+		if i < len(side) {
+			b.WriteString("   " + side[i])
 		}
-	}
-
-	b.WriteString("  Exits:")
-	any := false
-	for _, dir := range []string{"n", "e", "s", "w"} {
-		off := world.Dirs[dir]
-		there := s.RoomAt(rm.Depth, rm.X+off[0], rm.Y+off[1])
-		if there == nil {
-			continue
-		}
-		d := s.DoorBetween(rm.Num, there.Num)
-		if d == nil || !d.Revealed {
-			continue
-		}
-		any = true
-		label := fmt.Sprintf("%s→%d", dir, there.Num)
-		switch d.Kind {
-		case world.Locked:
-			label += " (locked)"
-		case world.Plate:
-			label += fmt.Sprintf(" (sealed, plate in %d)", d.Plate)
-		}
-		if !there.Revealed {
-			label += st.Dim(" unexplored")
-		} else if there.Murk {
-			label += st.Murk(" murky")
-		}
-		b.WriteString(" " + label)
-	}
-	if !any {
-		b.WriteString(" none you can see")
-	}
-	b.WriteString("\n")
-
-	var others []string
-	for _, o := range s.PlayersIn(rm.Num) {
-		if o == p {
-			continue
-		}
-		name := o.User
-		if o.Downed {
-			name += st.Bad(" (downed)")
-		}
-		others = append(others, name)
-	}
-	if len(others) > 0 {
-		fmt.Fprintf(&b, "  Here with you: %s\n", strings.Join(others, ", "))
-	}
-	for _, n := range notes {
-		fmt.Fprintf(&b, "  %s %s\n", st.Dim(fmt.Sprintf("note from %s, %s:", n.User, ago(s.Now, n.At))), n.Text)
+		b.WriteString("\n")
 	}
 	return b.String()
-}
-
-func ago(now, t time.Time) string {
-	d := now.Sub(t)
-	switch {
-	case d < time.Hour:
-		return "just now"
-	case d < 24*time.Hour:
-		return fmt.Sprintf("%dh ago", int(d.Hours()))
-	default:
-		return fmt.Sprintf("%dd ago", int(d.Hours()/24))
-	}
 }
 
 // Who lists everyone.
-func Who(st Style, s *world.State, me *world.Player) string {
+func Who(s *world.State, me *world.Player) string {
 	var b strings.Builder
 	for _, u := range s.Users() {
 		p := s.Players[u]
-		rm := s.Room(p.Room)
-		name := fmt.Sprintf("%-12s", u)
-		if p == me {
-			name = st.You(name)
+		state := ""
+		switch {
+		case p.KO:
+			state = HPStyle.Render("  knocked out")
+		case p.Battle != 0:
+			state = EnemyStyle.Render("  fighting")
 		}
-		extra := ""
-		if p.Downed {
-			extra = st.Bad("  DOWNED")
-		}
-		fmt.Fprintf(&b, "%s %s  %d turns  room %-3d %s%s\n", name, st.Bad(Hearts(p)), p.Turns, rm.Num, depthName(rm.Depth), extra)
+		fmt.Fprintf(&b, "%s %-12s Lv %-2d ♥ %3d/%-3d ⚡ %3d  floor %d, room %d%s\n", PlayerTag(p, p == me), u,
+			p.Level, p.HP, p.MaxHP(), p.Energy, s.Room(p.Room).Floor, p.Room, state)
 	}
 	return b.String()
 }
 
-// Log shows recent events.
-func Log(st Style, s *world.State, events []world.Event) string {
+// Log lists events, oldest first (events must be newest first).
+func Log(events []world.Event) string {
 	if len(events) == 0 {
 		return "Nothing has happened yet.\n"
 	}
 	var b strings.Builder
 	for i := len(events) - 1; i >= 0; i-- {
 		e := events[i]
-		fmt.Fprintf(&b, "%s %s\n", st.Dim(e.At.In(clock.Zone).Format("Mon Jan 2 15:04")), e.Text)
+		fmt.Fprintf(&b, "%s %s\n", Dim.Render(e.At.In(clock.Zone).Format("Mon Jan 2 15:04")), e.Text)
 	}
 	return b.String()
 }
 
-const Help = `THE VAULT: a slow co-op dungeon. Everyone shares one world.
-You get 3 turns at 3 AM ET (Toronto) each day, and can bank up to 6.
+// Ago formats how long ago something happened.
+func Ago(now, t time.Time) string {
+	d := now.Sub(t)
+	switch {
+	case d < time.Minute:
+		return "now"
+	case d < time.Hour:
+		return fmt.Sprintf("%dm", int(d.Minutes()))
+	case d < 24*time.Hour:
+		return fmt.Sprintf("%dh", int(d.Hours()))
+	}
+	return fmt.Sprintf("%dd", int(d.Hours()/24))
+}
 
-Costs a turn:
-  go <n|s|e|w|room>   move to a neighbouring room (also: n, s, e, w)
-  search              look for hidden packages and doors
-  use key [dir]       unlock a door, or turn a key in a tarball's seal
-  use torch           burn the Murk out of this room for two nights
-  open                unseal a tarball (needs two people in the room)
-  descend / ascend    take the stairs
-  rest                recover one heart
-  revive <user>       get a downed teammate back up
+const Help = `THE VAULT: a shared co-op dungeon crawler.
 
-Free:
-  (nothing)           your status and room
-  map [depth]         the explored map
-  look, who, log      room, players, recent happenings
-  note "<text>"       scratch a note into the wall for others
-  give <user> <pkg>   hand a package to someone in your room
+  thevault          play (arrow keys, hjkl or wasd to move)
+  thevault motd     today's news and your room
+  thevault who      everyone's stats
+  thevault log      recent happenings
+  thevault help     this text
 
-Every night at 3 AM the Murk spreads. End your day in a murky room and you
-lose a heart; at zero you're downed. A rope saves you once.
-Goal: unpack the Lost Package on depth 5 and carry it through the Deep Gate.
+You get 100 energy at 3 AM ET (Toronto) each day, banked up to 200.
+A step costs 1. Walk into an enemy (&) to fight it. Attacking costs 3,
+defending 2, using a package 1, and fleeing is free. Anyone who walks into
+the same enemy joins the fight, and every ally adds +25% damage. Everyone
+who lands a hit gets the XP.
+
+Packages (*): patch heals, rimraf blasts an enemy, cache gives energy.
+At 0 HP you're knocked out until 3 AM. Beat the boss on floor 5 to win.
 `

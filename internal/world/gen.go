@@ -5,253 +5,327 @@ import (
 	"slices"
 )
 
-// Generate builds a full season dungeon from a seed. The same seed always
-// gives the same dungeon.
-func Generate(seed uint64) ([]*Room, []*Door, []*Item) {
-	g := &gen{}
-	for depth := 1; depth <= Depths; depth++ {
-		g.r = rand.New(rand.NewPCG(seed, uint64(depth)))
-		g.depth(depth)
+// BossName is the final enemy, on the last floor.
+var BossName = Boss.Name
+
+const BossLevel = 9
+
+func enemyStats(level int, boss bool) (hp, atk int) {
+	hp, atk = 8+6*level, 1+3*level/2
+	if boss {
+		hp, atk = hp*4, atk*13/10
 	}
-	return g.rooms, g.doors, g.items
+	return
 }
 
-type cell struct{ x, y int }
-
-type gen struct {
-	r     *rand.Rand
-	rooms []*Room
-	doors []*Door
-	items []*Item
+// NewEnemy makes an enemy for a floor.
+func NewEnemy(r *rand.Rand, id, floor int) *Enemy {
+	level := floor + r.IntN(2)
+	tier := Tiers[min(floor, Floors)-1]
+	hp, atk := enemyStats(level, false)
+	return &Enemy{ID: id, Name: tier[r.IntN(len(tier))].Name, Level: level, HP: hp, MaxHP: hp, Atk: atk, Hitters: map[string]bool{}}
 }
 
-func (g *gen) item(kind string, room int, hidden, inBox bool) {
-	g.items = append(g.items, &Item{ID: len(g.items) + 1, Kind: kind, Room: room, Hidden: hidden, InBox: inBox})
+// Generate builds a whole season's dungeon from a seed. The same seed always
+// gives the same dungeon.
+func Generate(seed uint64) ([]*Room, []DoorLink, []*Enemy, []*Item) {
+	var rooms []*Room
+	var doors []DoorLink
+	for floor := 1; floor <= Floors; floor++ {
+		r := rand.New(rand.NewPCG(seed, uint64(floor)))
+		fr, fd := genFloor(r, floor, len(rooms))
+		rooms = append(rooms, fr...)
+		doors = append(doors, fd...)
+	}
+	BuildLayouts(seed, rooms, doors)
+
+	var enemies []*Enemy
+	var items []*Item
+	for floor := 1; floor <= Floors; floor++ {
+		r := rand.New(rand.NewPCG(seed, uint64(100+floor)))
+		var floorRooms []*Room
+		for _, rm := range rooms {
+			if rm.Floor == floor {
+				floorRooms = append(floorRooms, rm)
+			}
+		}
+		for i, rm := range floorRooms {
+			taken := map[[2]int]bool{}
+			place := func() (int, int) {
+				for {
+					x, y := 1+r.IntN(RoomW-2), 1+r.IntN(RoomH-2)
+					if rm.Tiles[y][x] == Floor && !taken[[2]int{x, y}] && !nearDoor(rm, x, y) {
+						taken[[2]int{x, y}] = true
+						return x, y
+					}
+				}
+			}
+			switch {
+			case floor == Floors && rm.Kind == Stairs:
+				hp, atk := enemyStats(BossLevel, true)
+				x, y := place()
+				enemies = append(enemies, &Enemy{ID: len(enemies) + 1, Room: rm.Num, X: x, Y: y, Name: BossName,
+					Level: BossLevel, HP: hp, MaxHP: hp, Atk: atk, Boss: true, Hitters: map[string]bool{}})
+			case i > 0: // the first room on each floor starts calm
+				for range r.IntN(3) {
+					e := NewEnemy(r, len(enemies)+1, floor)
+					e.Room = rm.Num
+					e.X, e.Y = place()
+					enemies = append(enemies, e)
+				}
+			}
+			if r.IntN(2) == 0 {
+				x, y := place()
+				items = append(items, &Item{ID: len(items) + 1, Kind: RandomPackage(r), Room: rm.Num, X: x, Y: y})
+			}
+		}
+	}
+	return rooms, doors, enemies, items
 }
 
-func (g *gen) depth(depth int) {
-	r := g.r
-	target := 10 + r.IntN(5)
+// RandomPackage picks a package kind: patches are the most common.
+func RandomPackage(r *rand.Rand) string {
+	switch n := r.IntN(4); {
+	case n < 2:
+		return Patch
+	case n == 2:
+		return Rimraf
+	}
+	return Cache
+}
 
-	// Grow a tree of rooms outward from an entrance on the west edge.
-	start := cell{0, r.IntN(GridH)}
-	at := map[cell]*Room{}
+// genFloor grows a tree of rooms across the floor grid, then adds a few loops.
+func genFloor(r *rand.Rand, floor, numBase int) ([]*Room, []DoorLink) {
+	target := 8 + r.IntN(4)
+	at := map[[2]int]*Room{}
 	parent := map[*Room]*Room{}
 	var order []*Room
-	add := func(c cell, from *Room) {
-		rm := &Room{Num: len(g.rooms) + 1, Depth: depth, X: c.x, Y: c.y}
-		g.rooms = append(g.rooms, rm)
-		at[c] = rm
+	var doors []DoorLink
+	link := func(a, b *Room) {
+		lo, hi := min(a.Num, b.Num), max(a.Num, b.Num)
+		doors = append(doors, DoorLink{lo, hi})
+	}
+	add := func(x, y int, from *Room) {
+		rm := &Room{Num: numBase + len(order) + 1, Floor: floor, X: x, Y: y}
+		at[[2]int{x, y}] = rm
 		parent[rm] = from
 		order = append(order, rm)
+		if from != nil {
+			link(from, rm)
+		}
 	}
-	add(start, nil)
+	add(0, r.IntN(FloorH), nil)
 	for len(order) < target {
 		from := order[r.IntN(len(order))]
-		var free []cell
-		for _, d := range [][2]int{{0, -1}, {0, 1}, {1, 0}, {-1, 0}} {
-			c := cell{from.X + d[0], from.Y + d[1]}
-			if c.x >= 0 && c.x < GridW && c.y >= 0 && c.y < GridH && at[c] == nil {
+		var free [][2]int
+		for _, d := range Dirs {
+			c := [2]int{from.X + d[0], from.Y + d[1]}
+			if c[0] >= 0 && c[0] < FloorW && c[1] >= 0 && c[1] < FloorH && at[c] == nil {
 				free = append(free, c)
 			}
 		}
 		if len(free) > 0 {
-			add(free[r.IntN(len(free))], from)
+			c := pickCell(r, free)
+			add(c[0], c[1], from)
 		}
 	}
-
-	entrance := order[0]
-	entrance.Kind = Entrance
-	children := map[*Room][]*Room{}
-	for _, rm := range order[1:] {
-		children[parent[rm]] = append(children[parent[rm]], rm)
-	}
-
-	// Tree distance from the entrance; the farthest room gets the stairs.
-	dist := map[*Room]int{entrance: 0}
-	for _, rm := range order[1:] {
-		dist[rm] = dist[parent[rm]] + 1
-	}
-	stairs := order[1]
-	for _, rm := range order[1:] {
-		if dist[rm] > dist[stairs] {
-			stairs = rm
-		}
-	}
-	stairs.Kind = Stairs
-
-	// The tarball sits in a dead end.
-	var leaves, others []*Room
-	for _, rm := range order {
-		if rm.Kind != Plain {
-			continue
-		}
-		others = append(others, rm)
-		if len(children[rm]) == 0 {
-			leaves = append(leaves, rm)
-		}
-	}
-	box := pick(r, leaves)
-	if box == nil {
-		box = pick(r, others)
-	}
-	box.Kind = Tarball
-
-	// Tree doors are open, except that one may be locked, gating a branch.
-	treeDoor := map[*Room]*Door{}
-	for _, rm := range order[1:] {
-		d := g.door(parent[rm], rm, Open)
-		treeDoor[rm] = d
-	}
-	gated := map[*Room]bool{}
-	locks := 0
-	if r.Float64() < 0.6 {
-		var cands []*Room
-		for _, rm := range order[2:] {
-			if n := len(subtree(rm, children)); n >= 2 && n <= target/2 {
-				cands = append(cands, rm)
-			}
-		}
-		if rm := pick(r, cands); rm != nil {
-			treeDoor[rm].Kind = Locked
-			locks++
-			for _, c := range subtree(rm, children) {
-				gated[c] = true
-			}
-		}
-	}
-	var reachable []*Room // reachable without passing the gated branch
-	for _, rm := range order {
-		if !gated[rm] {
-			reachable = append(reachable, rm)
-		}
-	}
-
-	// Extra doors make loops: shortcuts that may be locked, plated or hidden.
 	for _, a := range order {
 		for _, d := range [][2]int{{1, 0}, {0, 1}} {
-			b := at[cell{a.X + d[0], a.Y + d[1]}]
-			if b == nil || parent[a] == b || parent[b] == a || r.Float64() > 0.3 {
+			b := at[[2]int{a.X + d[0], a.Y + d[1]}]
+			if b != nil && parent[a] != b && parent[b] != a && r.Float64() < 0.3 {
+				link(a, b)
+			}
+		}
+	}
+	if floor > 1 {
+		order[0].Kind = Entrance
+	}
+	// The stairs go in the room farthest from the start.
+	dist := map[*Room]int{order[0]: 0}
+	far := order[1]
+	for _, rm := range order[1:] {
+		dist[rm] = dist[parent[rm]] + 1
+		if dist[rm] > dist[far] {
+			far = rm
+		}
+	}
+	far.Kind = Stairs
+	return order, doors
+}
+
+// pickCell picks a random cell, sorting first so the result is reproducible
+// (the candidates come from iterating a map).
+func pickCell(r *rand.Rand, cells [][2]int) [2]int {
+	slices.SortFunc(cells, func(a, b [2]int) int { return (a[1]*FloorW + a[0]) - (b[1]*FloorW + b[0]) })
+	return cells[r.IntN(len(cells))]
+}
+
+// Door tile positions in the walls: the middle of each side.
+func DoorTile(dir string) (int, int) {
+	switch dir {
+	case "up":
+		return RoomW / 2, 0
+	case "down":
+		return RoomW / 2, RoomH - 1
+	case "left":
+		return 0, RoomH / 2
+	}
+	return RoomW - 1, RoomH / 2
+}
+
+// Opposite returns the reverse direction.
+func Opposite(dir string) string {
+	return map[string]string{"up": "down", "down": "up", "left": "right", "right": "left"}[dir]
+}
+
+// DoorDir returns which wall of a room the tile (x, y) is a door in.
+func DoorDir(x, y int) string {
+	for _, d := range []string{"up", "down", "left", "right"} {
+		if dx, dy := DoorTile(d); dx == x && dy == y {
+			return d
+		}
+	}
+	return ""
+}
+
+func nearDoor(rm *Room, x, y int) bool {
+	for _, d := range Dirs {
+		if rm.At(x+d[0], y+d[1]) == Door {
+			return true
+		}
+	}
+	return false
+}
+
+// BuildLayouts fills in every room's tiles. It's deterministic, so layouts
+// are rebuilt on load instead of being stored.
+func BuildLayouts(seed uint64, rooms []*Room, doors []DoorLink) {
+	byNum := map[int]*Room{}
+	for _, rm := range rooms {
+		byNum[rm.Num] = rm
+	}
+	for _, rm := range rooms {
+		exits := map[string]bool{}
+		for _, d := range doors {
+			if d.A != rm.Num && d.B != rm.Num {
 				continue
 			}
-			dr := g.door(a, b, Open)
-			switch roll := r.Float64(); {
-			case roll < 0.25:
-				dr.Kind = Locked
-				locks++
-			case roll < 0.5:
-				var plates []*Room
-				for _, p := range reachable {
-					if p != a && p != b {
-						plates = append(plates, p)
-					}
-				}
-				if p := pick(r, plates); p != nil {
-					dr.Kind = Plate
-					dr.Plate = p.Num
+			o := byNum[d.Other(rm.Num)]
+			for name, off := range Dirs {
+				if rm.X+off[0] == o.X && rm.Y+off[1] == o.Y {
+					exits[name] = true
 				}
 			}
-			dr.Hidden = r.Float64() < 0.3
 		}
+		layout(rand.New(rand.NewPCG(seed, uint64(10000+rm.Num))), rm, exits)
 	}
+}
 
-	// Murk sources grow in number with depth and avoid the important rooms.
-	var murkable []*Room
-	for _, rm := range order {
-		if dist[rm] >= 2 && rm.Kind == Plain {
-			murkable = append(murkable, rm)
-		}
-	}
-	r.Shuffle(len(murkable), func(i, j int) { murkable[i], murkable[j] = murkable[j], murkable[i] })
-	for _, rm := range murkable[:min(len(murkable), 1+(depth-1)/2)] {
-		rm.Source = true
-		rm.Murk = true
-	}
-
-	// Hidden packages. Keys never hide behind the lock they open.
-	var stash, keyStash []*Room
-	for _, rm := range order {
-		if rm != entrance {
-			stash = append(stash, rm)
-			if !gated[rm] {
-				keyStash = append(keyStash, rm)
+func layout(r *rand.Rand, rm *Room, exits map[string]bool) {
+	t := &rm.Tiles
+	for y := range RoomH {
+		for x := range RoomW {
+			if x == 0 || y == 0 || x == RoomW-1 || y == RoomH-1 {
+				t[y][x] = Wall
+			} else {
+				t[y][x] = Floor
 			}
 		}
 	}
-	for range locks + 1 {
-		g.item(Key, pick(r, keyStash).Num, true, false)
+	for _, d := range []string{"up", "down", "left", "right"} {
+		if exits[d] {
+			x, y := DoorTile(d)
+			t[y][x] = Door
+		}
 	}
-	g.item(Torch, pick(r, stash).Num, true, false)
-	g.item(Torch, pick(r, stash).Num, true, false)
-	g.item(Rope, pick(r, stash).Num, true, false)
-
-	if depth == Depths {
-		g.item(Relic, box.Num, false, true)
-	} else {
-		g.item(Torch, box.Num, false, true)
-		g.item(Rope, box.Num, false, true)
-		g.item(Key, box.Num, false, true)
+	// Pillars and rubble, keeping the middle row and column clear so every
+	// door connects.
+	for range r.IntN(6) {
+		px, py := 2+r.IntN(RoomW-4), 2+r.IntN(RoomH-4)
+		w, h := 1+r.IntN(3), 1+r.IntN(2)
+		for y := py; y < min(py+h, RoomH-2); y++ {
+			for x := px; x < min(px+w, RoomW-2); x++ {
+				if x != RoomW/2 && y != RoomH/2 {
+					t[y][x] = Wall
+				}
+			}
+		}
+	}
+	// Wall off any pocket you couldn't walk to.
+	seen := map[[2]int]bool{}
+	stack := [][2]int{{RoomW / 2, RoomH / 2}}
+	for len(stack) > 0 {
+		c := stack[len(stack)-1]
+		stack = stack[:len(stack)-1]
+		if seen[c] || rm.At(c[0], c[1]) == Wall {
+			continue
+		}
+		seen[c] = true
+		for _, d := range Dirs {
+			stack = append(stack, [2]int{c[0] + d[0], c[1] + d[1]})
+		}
+	}
+	var spots [][2]int
+	for y := 1; y < RoomH-1; y++ {
+		for x := 1; x < RoomW-1; x++ {
+			if t[y][x] == Floor && !seen[[2]int{x, y}] {
+				t[y][x] = Wall
+			}
+			if t[y][x] == Floor && x != RoomW/2 && y != RoomH/2 && !nearDoor(rm, x, y) {
+				spots = append(spots, [2]int{x, y})
+			}
+		}
+	}
+	stair := func(tile byte) {
+		if len(spots) == 0 {
+			t[1][1] = tile // can't happen with the clear cross, but stay safe
+			return
+		}
+		c := spots[r.IntN(len(spots))]
+		t[c[1]][c[0]] = tile
+	}
+	if rm.Kind == Stairs && rm.Floor < Floors {
+		stair(StairDown)
+	}
+	if rm.Kind == Entrance {
+		stair(StairUp)
 	}
 }
 
-func (g *gen) door(a, b *Room, kind string) *Door {
-	lo, hi := a.Num, b.Num
-	if lo > hi {
-		lo, hi = hi, lo
+// FreeTile returns a random walkable tile with nothing on it.
+func (s *State) FreeTile(rm *Room) (int, int) {
+	var spots [][2]int
+	for y := 1; y < RoomH-1; y++ {
+		for x := 1; x < RoomW-1; x++ {
+			if rm.Tiles[y][x] == Floor && s.EnemyAt(rm.Num, x, y) == nil && !nearDoor(rm, x, y) && len(s.playersAt(rm.Num, x, y)) == 0 {
+				spots = append(spots, [2]int{x, y})
+			}
+		}
 	}
-	d := &Door{A: lo, B: hi, Kind: kind}
-	g.doors = append(g.doors, d)
-	return d
+	if len(spots) == 0 {
+		return RoomW / 2, RoomH / 2
+	}
+	c := spots[s.Rng.IntN(len(spots))]
+	return c[0], c[1]
 }
 
-func subtree(rm *Room, children map[*Room][]*Room) []*Room {
-	out := []*Room{rm}
-	for _, c := range children[rm] {
-		out = append(out, subtree(c, children)...)
+// NearTile returns a free walkable tile next to (x, y), for arriving by stairs.
+func (s *State) NearTile(rm *Room, x, y int) (int, int) {
+	for _, d := range [][2]int{{1, 0}, {-1, 0}, {0, 1}, {0, -1}, {1, 1}, {-1, -1}, {1, -1}, {-1, 1}} {
+		nx, ny := x+d[0], y+d[1]
+		if rm.At(nx, ny) == Floor && s.EnemyAt(rm.Num, nx, ny) == nil {
+			return nx, ny
+		}
 	}
-	return out
+	return s.FreeTile(rm)
 }
 
-func pick[T any](r *rand.Rand, xs []T) T {
-	var zero T
-	if len(xs) == 0 {
-		return zero
-	}
-	return xs[r.IntN(len(xs))]
-}
-
-// NewSeason returns a fresh state for a season, keeping the players.
-func NewSeason(s *State, id int, seed uint64) {
-	s.Season = Season{ID: id, Seed: seed, StartTick: s.Tick, StartedAt: s.Now}
-	s.Rooms, s.Doors, s.Items = Generate(seed)
-	s.FreshWorld = true
-	camp := s.Camp()
+func (s *State) playersAt(room, x, y int) []*Player {
+	var out []*Player
 	for _, p := range s.Players {
-		p.Room, p.HP, p.Downed = camp.Num, MaxHP, false
-	}
-	Reveal(s, camp)
-}
-
-// Reveal marks a room as explored and shows its visible doors.
-func Reveal(s *State, rm *Room) bool {
-	was := rm.Revealed
-	rm.Revealed = true
-	for _, d := range s.DoorsOf(rm.Num) {
-		if !d.Hidden {
-			d.Revealed = true
+		if p.Room == room && p.X == x && p.Y == y {
+			out = append(out, p)
 		}
 	}
-	return !was
-}
-
-// DepthRooms returns rooms of a depth in grid order, for stable output.
-func (s *State) DepthRooms(depth int) []*Room {
-	var out []*Room
-	for _, r := range s.Rooms {
-		if r.Depth == depth {
-			out = append(out, r)
-		}
-	}
-	slices.SortFunc(out, func(a, b *Room) int { return (a.Y*GridW + a.X) - (b.Y*GridW + b.X) })
 	return out
 }
