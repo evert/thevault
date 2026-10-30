@@ -52,14 +52,39 @@ const (
 
 var PackageKinds = []string{Patch, Rimraf, Cache}
 
+// Tokens open the locked stairs: vlt_1 on floor 1 gets you to floor 2, and
+// so on, with vlt_op opening the way to the last floor. Each floor with
+// stairs has its token lying in a room or carried by a monster.
+var tokens = map[int]string{1: "vlt_1", 2: "vlt_2", 3: "vlt_3", 4: "vlt_op"}
+
+// Token names the token that unlocks a floor's stairs ("" if none).
+func Token(floor int) string { return tokens[floor] }
+
+// TokenFloor is the floor a token belongs to, or 0 for other items.
+func TokenFloor(kind string) int {
+	for f, t := range tokens {
+		if t == kind {
+			return f
+		}
+	}
+	return 0
+}
+
+func IsToken(kind string) bool { return TokenFloor(kind) != 0 }
+
 type Room struct {
 	Num      int // unique within a season
 	Floor    int
 	X, Y     int // position in the floor grid
 	Kind     string
 	Revealed bool
+	Unlocked bool               // a stairs room stays locked until someone uses its token
 	Tiles    [RoomH][RoomW]byte // generated from the seed, never stored
 }
+
+// Locked is true for a stairs room nobody has opened yet. Every door into it
+// is locked. The boss's lair on the last floor has no lock.
+func (r *Room) Locked() bool { return r.Kind == Stairs && Token(r.Floor) != "" && !r.Unlocked }
 
 func (r *Room) At(x, y int) byte {
 	if x < 0 || y < 0 || x >= RoomW || y >= RoomH {
@@ -99,6 +124,7 @@ type Enemy struct {
 	MaxHP   int
 	Atk     int
 	Boss    bool
+	Key     bool            // carries its floor's token, dropped when it dies
 	Hitters map[string]bool // everyone who landed a hit gets the XP
 }
 
@@ -119,7 +145,7 @@ type Player struct {
 	Level    int
 	XP       int
 	Energy   int
-	Known    map[string]bool // enemy types fought: their levels show on your map
+	Known    map[string]bool // enemy types you have fought
 	Battle   int             // enemy ID while in a fight
 	Braced   bool            // defended: the next attack hits 50% harder
 	KO       bool            // knocked out until the next tick
@@ -203,6 +229,29 @@ func (s *State) Linked(a, b int) bool {
 		a, b = b, a
 	}
 	return slices.Contains(s.Doors, DoorLink{a, b})
+}
+
+// Beyond returns the room a door tile leads to, or nil.
+func (s *State) Beyond(rm *Room, x, y int) *Room {
+	off, ok := Dirs[DoorDir(x, y)]
+	if !ok {
+		return nil
+	}
+	next := s.RoomAt(rm.Floor, rm.X+off[0], rm.Y+off[1])
+	if next == nil || !s.Linked(rm.Num, next.Num) {
+		return nil
+	}
+	return next
+}
+
+// LockedDoor is true when the door tile at (x, y) leads into a locked room.
+// Doors only lock from the outside, so nobody can get shut in.
+func (s *State) LockedDoor(rm *Room, x, y int) bool {
+	if rm.At(x, y) != Door {
+		return false
+	}
+	next := s.Beyond(rm, x, y)
+	return next != nil && next.Locked()
 }
 
 func (s *State) FindKind(floor int, kind string) *Room {

@@ -14,6 +14,10 @@ import (
 // at world.MaxEnergy anyway.
 const MaxCatchUp = 7
 
+// KeyIdle is how long someone can be away before the tick takes their tokens
+// off them and leaves them where they stood.
+const KeyIdle = 48 * time.Hour
+
 // Oops is a player mistake: shown to them, but the transaction still commits.
 type Oops string
 
@@ -58,6 +62,9 @@ func spawn(s *world.State, p *world.Player) {
 	var best []*world.Room
 	fewest := 1 << 30
 	for _, rm := range s.FloorRooms(1) {
+		if rm.Locked() {
+			continue // no starting behind the locked door
+		}
 		// Other players matter most; enemies only break ties.
 		n := 0
 		for _, o := range s.Players {
@@ -135,6 +142,10 @@ func Tick(s *world.State, newSeed func() uint64) {
 
 	for _, u := range s.Users() {
 		p := s.Players[u]
+		// Someone who's stopped playing shouldn't sit on a token for days.
+		if s.Now.Sub(p.LastSeen) > KeyIdle && dropKeys(s, p) > 0 {
+			s.Emit(u, "key", fmt.Sprintf("%s hasn't been around, so their token was left in room %d.", u, p.Room))
+		}
 		if p.KO {
 			ent := floorStart(s, s.Room(p.Room).Floor)
 			p.KO, p.Battle, p.Braced = false, 0, false

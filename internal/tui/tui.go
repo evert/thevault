@@ -323,7 +323,7 @@ func (m *Model) battleView() []string {
 	var lines []string
 	name := render.EnemyGlyph(e) + " " + render.EnemyStyle.Render(fmt.Sprintf("Lv %d %s", e.Level, e.Name))
 	lines = append(lines, name)
-	lines = append(lines, render.HPStyle.Render("♥ ")+render.Bar(e.HP, e.MaxHP, 24, render.HPStyle)+fmt.Sprintf(" %d/%d", e.HP, e.MaxHP))
+	lines = append(lines, render.HPStyle.Render("❤️ ")+render.Bar(e.HP, e.MaxHP, 24, render.HPStyle)+fmt.Sprintf(" %d/%d", e.HP, e.MaxHP))
 	lines = append(lines, "")
 	var tags []string
 	for _, p := range m.s.Fighters(e.ID) {
@@ -334,6 +334,9 @@ func (m *Model) battleView() []string {
 		team += render.Dim.Render(fmt.Sprintf("  (+%d%% damage)", n*int(world.AllyBonus*100)))
 	}
 	lines = append(lines, "Fighting: "+team)
+	if token := world.Token(m.s.Room(e.Room).Floor); e.Key && token != "" {
+		lines = append(lines, render.KeyStyle.Render("⚷ It's carrying the "+token+" token."))
+	}
 	if m.me.Braced {
 		lines = append(lines, render.Dim.Render("You're braced: next attack +50%."))
 	}
@@ -390,8 +393,8 @@ func (m *Model) sidebar() []string {
 	rm := m.s.Room(me.Room)
 	lines := []string{
 		render.PlayerTag(me, true) + " " + render.Bold.Render(me.User) + render.Dim.Render(fmt.Sprintf("  Lv %d", me.Level)),
-		render.HPStyle.Render("♥ ") + render.Bar(me.HP, me.MaxHP(), 14, render.HPStyle) + fmt.Sprintf(" %d/%d", me.HP, me.MaxHP()),
-		render.XPStyle.Render("✦ ") + render.Bar(me.XP, world.XPToNext(me.Level), 14, render.XPStyle) + fmt.Sprintf(" %d/%d", me.XP, world.XPToNext(me.Level)),
+		render.HPStyle.Render("❤️ ") + render.Bar(me.HP, me.MaxHP(), 14, render.HPStyle) + fmt.Sprintf(" %d/%d", me.HP, me.MaxHP()),
+		render.XPStyle.Render("✦  ") + render.Bar(me.XP, world.XPToNext(me.Level), 14, render.XPStyle) + fmt.Sprintf(" %d/%d", me.XP, world.XPToNext(me.Level)),
 		render.EnergyStyle.Render("⚡") + " " + render.Bar(me.Energy, world.MaxEnergy, 14, render.EnergyStyle) + fmt.Sprintf(" %d", me.Energy),
 		"",
 		render.Dim.Render("packages"),
@@ -406,6 +409,11 @@ func (m *Model) sidebar() []string {
 	for _, kind := range world.PackageKinds {
 		if n := counts[kind]; n > 0 {
 			lines = append(lines, fmt.Sprintf("  %s ×%d", render.PackageStyle.Render(kind), n))
+		}
+	}
+	for f := 1; f < world.Floors; f++ {
+		if token := world.Token(f); counts[token] > 0 {
+			lines = append(lines, "  "+render.KeyStyle.Render("⚷ "+token))
 		}
 	}
 	lines = append(lines, "", render.Dim.Render(fmt.Sprintf("floor %d", rm.Floor)))

@@ -47,7 +47,7 @@ var Tiers = [Floors][]EnemyType{
 	},
 }
 
-var Boss = EnemyType{"The node_modules Abyss", "Ω", 201}
+var Boss = EnemyType{"Work-Life Balance", "Ω", 201}
 
 var typesByName = func() map[string]EnemyType {
 	m := map[string]EnemyType{Boss.Name: Boss}

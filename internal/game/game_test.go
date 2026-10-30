@@ -1,7 +1,9 @@
 package game
 
 import (
+	"fmt"
 	"math/rand/v2"
+	"strings"
 	"testing"
 	"time"
 
@@ -321,5 +323,144 @@ func TestFightingTeachesTheType(t *testing.T) {
 	Flee(s, a)
 	if !a.Known[e.Name] {
 		t.Fatal("fleeing made alice forget the type")
+	}
+}
+
+// outsideLock puts a player next to a door into the floor's locked stairs
+// room and returns the direction to walk.
+func outsideLock(t *testing.T, s *world.State, p *world.Player, floor int) (string, *world.Room) {
+	t.Helper()
+	st := s.FindKind(floor, world.Stairs)
+	for name, off := range world.Dirs {
+		n := s.RoomAt(floor, st.X-off[0], st.Y-off[1])
+		if n == nil || !s.Linked(n.Num, st.Num) {
+			continue
+		}
+		dx, dy := world.DoorTile(name)
+		p.Room, p.X, p.Y = n.Num, dx-off[0], dy-off[1]
+		return name, st
+	}
+	t.Fatal("stairs room has no doors")
+	return "", nil
+}
+
+func TestLockedDoorNeedsToken(t *testing.T) {
+	s := newState(6)
+	p := Join(s, "alice")
+	s.Enemies = nil
+	dir, st := outsideLock(t, s, p, 1)
+	room, energy := p.Room, p.Energy
+	if _, err := Move(s, p, dir); !IsOops(err) || !strings.Contains(err.Error(), "vlt_1") {
+		t.Fatalf("walked into a locked door: %v", err)
+	}
+	if p.Room != room || p.Energy != energy {
+		t.Fatal("bumping a locked door moved you or cost energy")
+	}
+	s.Items = append(s.Items, &world.Item{ID: s.NextItemID(), Kind: "vlt_1", Holder: "alice"})
+	if _, err := Move(s, p, dir); err != nil {
+		t.Fatal(err)
+	}
+	if p.Room != st.Num || st.Locked() || s.Holding("alice", "vlt_1") != nil {
+		t.Fatalf("room=%d locked=%v key kept=%v", p.Room, st.Locked(), s.Holding("alice", "vlt_1") != nil)
+	}
+	// It stays open for everyone else.
+	b := Join(s, "bob")
+	dir, _ = outsideLock(t, s, b, 1)
+	if _, err := Move(s, b, dir); err != nil || b.Room != st.Num {
+		t.Fatalf("bob couldn't follow: %v", err)
+	}
+}
+
+func TestTokenHints(t *testing.T) {
+	s := newState(6)
+	p := Join(s, "alice")
+	s.Items, s.Enemies = nil, nil
+	if h := lockedHint(s, p, 1); h != "Locked. It needs the vlt_1 token." {
+		t.Fatalf("no token anywhere: %q", h)
+	}
+	rm := s.FloorRooms(1)[1]
+	s.Items = append(s.Items, &world.Item{ID: 1, Kind: "vlt_1", Room: rm.Num, X: 1, Y: 1})
+	if h := lockedHint(s, p, 1); !strings.Contains(h, "lying somewhere on this floor") {
+		t.Fatalf("key on the floor: %q", h)
+	}
+	Join(s, "bob")
+	s.Items[0].Holder = "bob"
+	if h := lockedHint(s, p, 1); !strings.Contains(h, "bob has it") {
+		t.Fatalf("bob holds it: %q", h)
+	}
+}
+
+func TestMonsterDropsToken(t *testing.T) {
+	s := newState(7)
+	p := Join(s, "alice")
+	var e *world.Enemy
+	for _, o := range s.Enemies {
+		if !o.Boss {
+			e = o
+			break
+		}
+	}
+	e.Key, e.HP = true, 1
+	besides(s, p, e)
+	if _, err := Move(s, p, "right"); err != nil {
+		t.Fatal(err)
+	}
+	msg, err := Attack(s, p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := world.Token(s.Room(e.Room).Floor)
+	if s.Holding("alice", want) == nil || !strings.Contains(msg, want) {
+		t.Fatalf("no %s from the carrier: %q", want, msg)
+	}
+}
+
+func TestKnockoutDropsToken(t *testing.T) {
+	s := newState(8)
+	p := Join(s, "alice")
+	e := s.Enemies[0]
+	e.Atk = 1000
+	besides(s, p, e)
+	Move(s, p, "right")
+	s.Items = append(s.Items, &world.Item{ID: s.NextItemID(), Kind: "vlt_1", Holder: "alice"})
+	for !p.KO {
+		p.HP = 1
+		Defend(s, p)
+	}
+	key := s.Items[len(s.Items)-1]
+	if key.Holder != "" || key.Room != p.Room {
+		t.Fatalf("key after KO: holder=%q room=%d", key.Holder, key.Room)
+	}
+	if s.ItemAt(key.Room, key.X, key.Y) != key {
+		t.Fatal("dropped key isn't on the map")
+	}
+}
+
+func TestIdlePlayerDropsToken(t *testing.T) {
+	s := newState(9)
+	a, b := Join(s, "alice"), Join(s, "bob")
+	s.Items = append(s.Items,
+		&world.Item{ID: s.NextItemID(), Kind: "vlt_1", Holder: "alice"},
+		&world.Item{ID: s.NextItemID() + 1, Kind: "vlt_2", Holder: "bob"})
+	a.LastSeen = s.Now.Add(-3 * 24 * time.Hour)
+	b.LastSeen = s.Now
+	Tick(s, seq())
+	if s.Holding("alice", "vlt_1") != nil {
+		t.Fatal("alice kept her key while away")
+	}
+	if s.Holding("bob", "vlt_2") == nil {
+		t.Fatal("bob lost his key after playing today")
+	}
+}
+
+func TestNobodyStartsInALockedRoom(t *testing.T) {
+	for seed := uint64(1); seed < 30; seed++ {
+		s := newState(seed)
+		for i := range 12 {
+			p := Join(s, fmt.Sprintf("user%d", i))
+			if s.Room(p.Room).Locked() {
+				t.Fatalf("seed %d: %s started in the locked room", seed, p.User)
+			}
+		}
 	}
 }

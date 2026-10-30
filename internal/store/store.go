@@ -24,18 +24,20 @@ import (
 
 // schemaVersion is bumped whenever the tables change. Versions before 2
 // predate the current game and are wiped; later ones are migrated.
-const schemaVersion = 3
+const schemaVersion = 4
 
 const schema = `
 CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE seasons (
 	id INTEGER PRIMARY KEY, seed INTEGER NOT NULL, start_tick INTEGER NOT NULL,
 	started_at INTEGER NOT NULL, won_tick INTEGER NOT NULL DEFAULT 0, winner TEXT NOT NULL DEFAULT '');
-CREATE TABLE rooms (season INTEGER NOT NULL, num INTEGER NOT NULL, revealed INTEGER NOT NULL, PRIMARY KEY (season, num));
+CREATE TABLE rooms (
+	season INTEGER NOT NULL, num INTEGER NOT NULL, revealed INTEGER NOT NULL, unlocked INTEGER NOT NULL DEFAULT 0,
+	PRIMARY KEY (season, num));
 CREATE TABLE enemies (
 	season INTEGER NOT NULL, id INTEGER NOT NULL, room INTEGER NOT NULL, x INTEGER NOT NULL, y INTEGER NOT NULL,
 	name TEXT NOT NULL, level INTEGER NOT NULL, hp INTEGER NOT NULL, max_hp INTEGER NOT NULL, atk INTEGER NOT NULL,
-	boss INTEGER NOT NULL, hitters TEXT NOT NULL, PRIMARY KEY (season, id));
+	boss INTEGER NOT NULL, hitters TEXT NOT NULL, key INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (season, id));
 CREATE TABLE items (
 	season INTEGER NOT NULL, id INTEGER NOT NULL, kind TEXT NOT NULL, room INTEGER NOT NULL,
 	x INTEGER NOT NULL, y INTEGER NOT NULL, holder TEXT NOT NULL, PRIMARY KEY (season, id));
@@ -92,9 +94,20 @@ func migrate(tx *sql.Tx) error {
 	if v == schemaVersion {
 		return nil
 	}
-	if v == 2 {
-		if _, err := tx.Exec(`ALTER TABLE players ADD COLUMN known TEXT NOT NULL DEFAULT ''`); err != nil {
-			return err
+	if v >= 2 {
+		steps := map[int][]string{
+			2: {`ALTER TABLE players ADD COLUMN known TEXT NOT NULL DEFAULT ''`},
+			// Seasons from before keys have none to find, so their rooms
+			// start unlocked. New seasons write the column explicitly.
+			3: {`ALTER TABLE rooms ADD COLUMN unlocked INTEGER NOT NULL DEFAULT 1`,
+				`ALTER TABLE enemies ADD COLUMN key INTEGER NOT NULL DEFAULT 0`},
+		}
+		for ; v < schemaVersion; v++ {
+			for _, q := range steps[v] {
+				if _, err := tx.Exec(q); err != nil {
+					return err
+				}
+			}
 		}
 		_, err := tx.Exec(fmt.Sprintf(`PRAGMA user_version = %d`, schemaVersion))
 		return err
@@ -210,28 +223,31 @@ func Load(tx *sql.Tx, now time.Time) (*world.State, error) {
 	// The dungeon's shape comes from the seed; only what changes is stored.
 	s.Rooms, s.Doors, _, _ = world.Generate(s.Season.Seed)
 
-	if err := each(tx, `SELECT num, revealed FROM rooms WHERE season = ?`, []any{sid}, func(rows *sql.Rows) error {
+	if err := each(tx, `SELECT num, revealed, unlocked FROM rooms WHERE season = ?`, []any{sid}, func(rows *sql.Rows) error {
 		var num int
-		var rev bool
-		if err := rows.Scan(&num, &rev); err != nil {
+		var rev, unlocked bool
+		if err := rows.Scan(&num, &rev, &unlocked); err != nil {
 			return err
 		}
 		if rm := s.Room(num); rm != nil {
-			rm.Revealed = rev
+			rm.Revealed, rm.Unlocked = rev, unlocked
 		}
 		return nil
 	}); err != nil {
 		return nil, err
 	}
 
-	if err := each(tx, `SELECT id, room, x, y, name, level, hp, max_hp, atk, boss, hitters FROM enemies WHERE season = ? ORDER BY id`, []any{sid}, func(rows *sql.Rows) error {
+	if err := each(tx, `SELECT id, room, x, y, name, level, hp, max_hp, atk, boss, hitters, key FROM enemies WHERE season = ? ORDER BY id`, []any{sid}, func(rows *sql.Rows) error {
 		e := &world.Enemy{Hitters: map[string]bool{}}
 		var hitters string
-		if err := rows.Scan(&e.ID, &e.Room, &e.X, &e.Y, &e.Name, &e.Level, &e.HP, &e.MaxHP, &e.Atk, &e.Boss, &hitters); err != nil {
+		if err := rows.Scan(&e.ID, &e.Room, &e.X, &e.Y, &e.Name, &e.Level, &e.HP, &e.MaxHP, &e.Atk, &e.Boss, &hitters, &e.Key); err != nil {
 			return err
 		}
 		for _, u := range splitNames(hitters) {
 			e.Hitters[u] = true
+		}
+		if e.Boss {
+			e.Name = world.BossName // follow renames in older saves
 		}
 		s.Enemies = append(s.Enemies, e)
 		return nil
@@ -327,15 +343,15 @@ func Save(tx *sql.Tx, s *world.State) error {
 			return err
 		}
 	}
-	if err := insertAll(tx, `INSERT INTO rooms (season, num, revealed) VALUES (?, ?, ?)`, len(s.Rooms), func(i int) []any {
-		return []any{sid, s.Rooms[i].Num, b2i(s.Rooms[i].Revealed)}
+	if err := insertAll(tx, `INSERT INTO rooms (season, num, revealed, unlocked) VALUES (?, ?, ?, ?)`, len(s.Rooms), func(i int) []any {
+		return []any{sid, s.Rooms[i].Num, b2i(s.Rooms[i].Revealed), b2i(s.Rooms[i].Unlocked)}
 	}); err != nil {
 		return err
 	}
-	if err := insertAll(tx, `INSERT INTO enemies (season, id, room, x, y, name, level, hp, max_hp, atk, boss, hitters)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, len(s.Enemies), func(i int) []any {
+	if err := insertAll(tx, `INSERT INTO enemies (season, id, room, x, y, name, level, hp, max_hp, atk, boss, hitters, key)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, len(s.Enemies), func(i int) []any {
 		e := s.Enemies[i]
-		return []any{sid, e.ID, e.Room, e.X, e.Y, e.Name, e.Level, e.HP, e.MaxHP, e.Atk, b2i(e.Boss), joinSet(e.Hitters)}
+		return []any{sid, e.ID, e.Room, e.X, e.Y, e.Name, e.Level, e.HP, e.MaxHP, e.Atk, b2i(e.Boss), joinSet(e.Hitters), b2i(e.Key)}
 	}); err != nil {
 		return err
 	}

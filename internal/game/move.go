@@ -49,14 +49,22 @@ func Move(s *world.State, p *world.Player, dir string) (string, error) {
 	if e := s.EnemyAt(rm.Num, nx, ny); e != nil {
 		return engage(s, p, e), nil
 	}
+	locked := s.LockedDoor(rm, nx, ny)
+	if locked && s.Holding(p.User, world.Token(rm.Floor)) == nil {
+		return "", oops("%s", lockedHint(s, p, rm.Floor)) // bumping it is free, like a wall
+	}
 	if err := spend(s, p, world.StepCost); err != nil {
 		return "", err
+	}
+	opened := ""
+	if locked {
+		opened = unlock(s, p, s.Beyond(rm, nx, ny))
 	}
 	p.X, p.Y = nx, ny
 	msg := ""
 	switch tile {
 	case world.Door:
-		msg = goThrough(s, p, rm, world.DoorDir(nx, ny))
+		msg = joinMsg(opened, goThrough(s, p, rm, world.DoorDir(nx, ny)))
 	case world.StairDown:
 		msg = descend(s, p, rm)
 	case world.StairUp:
@@ -64,10 +72,76 @@ func Move(s *world.State, p *world.Player, dir string) (string, error) {
 	}
 	if it := s.ItemAt(p.Room, p.X, p.Y); it != nil {
 		it.Holder = p.User
-		msg = fmt.Sprintf("You installed %s.", PackageName(s, it))
+		if f := world.TokenFloor(it.Kind); f != 0 {
+			s.Emit(p.User, "key", fmt.Sprintf("%s found the %s token.", p.User, it.Kind))
+			msg = fmt.Sprintf("You picked up the %s token! It unlocks the stairs to floor %d.", it.Kind, f+1)
+		} else {
+			msg = fmt.Sprintf("You installed %s.", PackageName(s, it))
+		}
 	}
 	wander(s, p)
 	return msg, nil
+}
+
+// unlock uses up a token to open a floor's stairs for everyone.
+func unlock(s *world.State, p *world.Player, rm *world.Room) string {
+	token := world.Token(rm.Floor)
+	s.RemoveItem(s.Holding(p.User, token))
+	rm.Unlocked = true
+	s.Emit(p.User, "unlock", fmt.Sprintf("%s used %s to unlock the stairs to floor %d.", p.User, token, rm.Floor+1))
+	return fmt.Sprintf("%s accepted. The door swings open.", token)
+}
+
+// lockedHint tells you which token a door needs and where it is.
+func lockedHint(s *world.State, p *world.Player, floor int) string {
+	token := world.Token(floor)
+	locked := fmt.Sprintf("Locked. It needs the %s token.", token)
+	for _, it := range s.Items {
+		if it.Kind != token {
+			continue
+		}
+		switch f := s.Room(it.Room).Floor; {
+		case it.Holder == p.User:
+			return locked // can't happen: holding it opens the door
+		case it.Holder != "":
+			return fmt.Sprintf("%s %s has it.", locked, it.Holder)
+		case f == floor:
+			return locked + " It's lying somewhere on this floor."
+		default:
+			return fmt.Sprintf("%s It was left on floor %d.", locked, f)
+		}
+	}
+	for _, e := range s.Enemies {
+		if e.Key && world.Token(s.Room(e.Room).Floor) == token {
+			return locked + " One of the monsters on this floor is carrying it."
+		}
+	}
+	return locked
+}
+
+// dropKeys puts down every token a player holds, next to where they stand.
+func dropKeys(s *world.State, p *world.Player) int {
+	n := 0
+	rm := s.Room(p.Room)
+	for _, it := range s.Held(p.User) {
+		if !world.IsToken(it.Kind) {
+			continue
+		}
+		it.Holder, it.Room = "", rm.Num
+		it.X, it.Y = s.DropTile(rm, p.X, p.Y)
+		n++
+	}
+	return n
+}
+
+func joinMsg(a, b string) string {
+	switch {
+	case a == "":
+		return b
+	case b == "":
+		return a
+	}
+	return a + " " + b
 }
 
 func goThrough(s *world.State, p *world.Player, rm *world.Room, dir string) string {
@@ -143,6 +217,9 @@ func occupied(s *world.State, room, x, y int) bool {
 func UseOutside(s *world.State, p *world.Player, kind string) (string, error) {
 	if err := canAct(s, p); err != nil {
 		return "", err
+	}
+	if world.IsToken(kind) {
+		return "", oops("Walk into the locked door to use a token.")
 	}
 	it := s.Holding(p.User, kind)
 	if it == nil {

@@ -92,6 +92,9 @@ func UseInBattle(s *world.State, p *world.Player, kind string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	if world.IsToken(kind) {
+		return "", oops("A token won't help you here.")
+	}
 	it := s.Holding(p.User, kind)
 	if it == nil {
 		return "", oops("You don't have a %s package.", kind)
@@ -149,7 +152,11 @@ func counter(s *world.State, p *world.Player, e *world.Enemy, braced bool) strin
 		p.HP, p.KO, p.Battle, p.Braced = 0, true, 0, false
 		s.BattleLog(e.ID, "", fmt.Sprintf("%s knocked out %s!", e.Name, p.User))
 		s.Emit(p.User, "ko", fmt.Sprintf("%s was knocked out by Lv %d %s in room %d.", p.User, e.Level, e.Name, p.Room))
-		return fmt.Sprintf(" %s hits you for %d. Everything goes dark...", e.Name, dmg)
+		dropped := ""
+		if dropKeys(s, p) > 0 {
+			dropped = " Your token clatters to the floor."
+		}
+		return fmt.Sprintf(" %s hits you for %d. Everything goes dark...%s", e.Name, dmg, dropped)
 	}
 	s.BattleLog(e.ID, "", fmt.Sprintf("%s hit %s for %d.", e.Name, p.User, dmg))
 	return fmt.Sprintf(" %s hits you for %d.", e.Name, dmg)
@@ -196,6 +203,11 @@ func defeat(s *world.State, killer *world.Player, e *world.Enemy) string {
 		it := &world.Item{ID: s.NextItemID(), Kind: world.RandomPackage(s.Rng), Holder: killer.User}
 		s.Items = append(s.Items, it)
 		msg += fmt.Sprintf(" It dropped %s.", PackageName(s, it))
+	}
+	if token := world.Token(s.Room(e.Room).Floor); e.Key && token != "" {
+		s.Items = append(s.Items, &world.Item{ID: s.NextItemID(), Kind: token, Holder: killer.User})
+		s.Emit(killer.User, "key", fmt.Sprintf("%s took the %s token off a Lv %d %s.", killer.User, token, e.Level, e.Name))
+		msg += fmt.Sprintf(" It was carrying the %s token! You take it.", token)
 	}
 	return msg
 }

@@ -22,6 +22,7 @@ var (
 	StairStyle   = fg("255").Bold(true)
 	EnemyStyle   = fg("197").Bold(true)
 	PackageStyle = fg("220").Bold(true)
+	KeyStyle     = fg("226").Bold(true) // tokens and the doors they open
 	Dim          = fg("244")
 	Bold         = lipgloss.NewStyle().Bold(true)
 	HPStyle      = fg("203")
@@ -74,15 +75,21 @@ func tile(s *world.State, me *world.Player, rm *world.Room, people map[[2]int]*w
 		return PlayerTag(p, p == me) + " "
 	}
 	if e := s.EnemyAt(rm.Num, x, y); e != nil {
-		return EnemyTile(e, me)
+		return EnemyTile(e)
 	}
-	if s.ItemAt(rm.Num, x, y) != nil {
+	if it := s.ItemAt(rm.Num, x, y); it != nil {
+		if world.IsToken(it.Kind) {
+			return KeyStyle.Render("⚷") + " "
+		}
 		return PackageStyle.Render("*") + " "
 	}
 	switch rm.At(x, y) {
 	case world.Wall:
 		return WallStyle.Render("██")
 	case world.Door:
+		if s.LockedDoor(rm, x, y) {
+			return KeyStyle.Render("▓▓")
+		}
 		return DoorStyle.Render("░░")
 	case world.StairDown:
 		return StairStyle.Render(">") + " "
@@ -92,19 +99,9 @@ func tile(s *world.State, me *world.Player, rm *world.Room, people map[[2]int]*w
 	return FloorStyle.Render("·") + " "
 }
 
-// EnemyTile shows an enemy's type icon, plus its level once you've fought
-// that type before.
-func EnemyTile(e *world.Enemy, me *world.Player) string {
-	glyph := EnemyGlyph(e)
-	if me == nil || !me.Known[e.Name] {
-		return glyph + " "
-	}
-	level := fmt.Sprint(e.Level)
-	if e.Level > 9 {
-		level = "+"
-	}
-	return glyph + Dim.Render(level)
-}
+// EnemyTile shows an enemy's type icon. Its name and level only appear in a
+// fight.
+func EnemyTile(e *world.Enemy) string { return EnemyGlyph(e) + " " }
 
 func EnemyGlyph(e *world.Enemy) string {
 	t := world.TypeOf(e.Name)
@@ -155,6 +152,9 @@ func mapCell(s *world.State, me *world.Player, rm *world.Room) string {
 		// Show rooms you know a door leads to.
 		for _, d := range s.Doors {
 			if (d.A == rm.Num || d.B == rm.Num) && s.Room(d.Other(rm.Num)).Revealed {
+				if rm.Locked() {
+					return KeyStyle.Render("▓")
+				}
 				return Dim.Render("?")
 			}
 		}
@@ -189,7 +189,7 @@ func Bar(cur, max, width int, st lipgloss.Style) string {
 
 // How newsworthy each event kind is, for the MOTD headline.
 var priority = map[string]int{
-	"won": 100, "boss": 90, "lair": 80, "floor": 70, "ko": 60, "level": 55,
+	"won": 100, "boss": 90, "lair": 80, "floor": 70, "unlock": 66, "key": 62, "ko": 60, "level": 55,
 	"kill": 50, "wake": 30, "join": 20, "season": 15,
 }
 
@@ -216,14 +216,14 @@ func Motd(s *world.State, me *world.Player, events []world.Event) string {
 	if more > 0 {
 		extra = Dim.Render(fmt.Sprintf("  (+%d more: thevault log)", more))
 	}
-	fmt.Fprintf(&b, "%s %s %s%s\n", Title.Render("THE VAULT"), Dim.Render(fmt.Sprintf("day %d ·", s.Day())), head, extra)
+	fmt.Fprintf(&b, "  %s %s %s%s\n", Title.Render("THE VAULT"), Dim.Render(fmt.Sprintf("day %d ·", s.Day())), head, extra)
 
 	rm := s.Room(me.Room)
 	room := RoomLines(s, me, rm, me.X, me.Y, world.RoomW, world.RoomH)
 	side := []string{
 		fmt.Sprintf("%s  %s", PlayerTag(me, true), Bold.Render(me.User)),
 		fmt.Sprintf("Lv %d · floor %d/%d", me.Level, rm.Floor, world.Floors),
-		HPStyle.Render("♥ ") + Bar(me.HP, me.MaxHP(), 10, HPStyle) + fmt.Sprintf(" %d/%d", me.HP, me.MaxHP()),
+		HPStyle.Render("❤️ ") + Bar(me.HP, me.MaxHP(), 10, HPStyle) + fmt.Sprintf(" %d/%d", me.HP, me.MaxHP()),
 		EnergyStyle.Render("⚡") + " " + Bar(me.Energy, world.MaxEnergy, 10, EnergyStyle) + fmt.Sprintf(" %d", me.Energy),
 		"",
 	}
@@ -265,7 +265,7 @@ func Who(s *world.State, me *world.Player) string {
 		case p.Battle != 0:
 			state = EnemyStyle.Render("  fighting")
 		}
-		fmt.Fprintf(&b, "%s %-12s Lv %-2d ♥ %3d/%-3d ⚡ %3d  floor %d, room %d%s\n", PlayerTag(p, p == me), u,
+		fmt.Fprintf(&b, "%s %-12s Lv %-2d ❤️ %3d/%-3d ⚡ %3d  floor %d, room %d%s\n", PlayerTag(p, p == me), u,
 			p.Level, p.HP, p.MaxHP(), p.Energy, s.Room(p.Room).Floor, p.Room, state)
 	}
 	return b.String()
@@ -307,11 +307,17 @@ const Help = `THE VAULT: a shared co-op dungeon crawler.
   thevault help     this text
 
 You get 100 energy at 3 AM ET (Toronto) each day, banked up to 200.
-A step costs 1. Walk into an enemy (&) to fight it. Attacking costs 3,
+A step costs 1. Walk into an enemy (a lowercase letter) to fight it. Attacking costs 3,
 defending 2, using a package 1, and fleeing is free. Anyone who walks into
 the same enemy joins the fight, and every ally adds +25% damage. Everyone
 who lands a hit gets the XP.
 
 Packages (*): patch heals, rimraf blasts an enemy, cache gives energy.
 At 0 HP you're knocked out until 3 AM. Beat the boss on floor 5 to win.
+
+The stairs on floors 1-4 are behind a locked door (yellow). Each of those
+floors has an access token (⚷) lying in a room or carried by a monster:
+vlt_1, vlt_2, vlt_3 and vlt_op. Walk into the door holding it to open the
+way down for everyone. Get knocked out, or stay away for two days, and you
+drop it.
 `

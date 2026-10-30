@@ -80,7 +80,68 @@ func Generate(seed uint64) ([]*Room, []DoorLink, []*Enemy, []*Item) {
 			}
 		}
 	}
+	// Tokens get their own random stream so adding them didn't change any
+	// existing dungeon.
+	for floor := 1; floor < Floors; floor++ {
+		items = placeKey(rand.New(rand.NewPCG(seed, uint64(200+floor))), floor, rooms, enemies, items)
+	}
 	return rooms, doors, enemies, items
+}
+
+// placeKey hides a floor's token: half the time a monster carries it,
+// otherwise it lies in a room. Never in the floor's first room or in the locked one.
+func placeKey(r *rand.Rand, floor int, rooms []*Room, enemies []*Enemy, items []*Item) []*Item {
+	var spots []*Room
+	ok := map[int]bool{}
+	first := true
+	for _, rm := range rooms {
+		if rm.Floor != floor {
+			continue
+		}
+		if !first && rm.Kind != Stairs {
+			spots = append(spots, rm)
+			ok[rm.Num] = true
+		}
+		first = false
+	}
+	var carriers []*Enemy
+	for _, e := range enemies {
+		if ok[e.Room] && !e.Boss {
+			carriers = append(carriers, e)
+		}
+	}
+	if len(carriers) > 0 && r.IntN(2) == 0 {
+		carriers[r.IntN(len(carriers))].Key = true
+		return items
+	}
+	rm := spots[r.IntN(len(spots))]
+	var free [][2]int
+	for y := 1; y < RoomH-1; y++ {
+		for x := 1; x < RoomW-1; x++ {
+			if rm.Tiles[y][x] == Floor && !nearDoor(rm, x, y) && !taken(rm.Num, x, y, enemies, items) {
+				free = append(free, [2]int{x, y})
+			}
+		}
+	}
+	c := [2]int{RoomW / 2, RoomH / 2}
+	if len(free) > 0 {
+		c = free[r.IntN(len(free))]
+	}
+	return append(items, &Item{ID: len(items) + 1, Kind: Token(floor), Room: rm.Num, X: c[0], Y: c[1]})
+}
+
+func taken(room, x, y int, enemies []*Enemy, items []*Item) bool {
+	for _, e := range enemies {
+		if e.Room == room && e.X == x && e.Y == y {
+			return true
+		}
+	}
+	for _, it := range items {
+		if it.Holder == "" && it.Room == room && it.X == x && it.Y == y {
+			return true
+		}
+	}
+	return false
 }
 
 // RandomPackage picks a package kind: patches are the most common.
@@ -319,6 +380,25 @@ func (s *State) NearTile(rm *Room, x, y int) (int, int) {
 	}
 	return s.FreeTile(rm)
 }
+
+// DropTile finds the nearest walkable tile to (x, y) with no package or
+// enemy on it, for dropping things.
+func (s *State) DropTile(rm *Room, x, y int) (int, int) {
+	for r := 0; r < RoomW; r++ {
+		for dy := -r; dy <= r; dy++ {
+			for dx := -r; dx <= r; dx++ {
+				nx, ny := x+dx, y+dy
+				if max(abs(dx), abs(dy)) == r && rm.At(nx, ny) == Floor &&
+					s.ItemAt(rm.Num, nx, ny) == nil && s.EnemyAt(rm.Num, nx, ny) == nil {
+					return nx, ny
+				}
+			}
+		}
+	}
+	return s.FreeTile(rm)
+}
+
+func abs(n int) int { return max(n, -n) }
 
 func (s *State) playersAt(room, x, y int) []*Player {
 	var out []*Player

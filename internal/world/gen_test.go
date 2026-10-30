@@ -113,3 +113,46 @@ func TestEnemyTypesLookDifferent(t *testing.T) {
 		}
 	}
 }
+
+func TestFloorsHaveTokens(t *testing.T) {
+	for seed := uint64(0); seed < 300; seed++ {
+		rooms, doors, enemies, items := Generate(seed)
+		s := &State{Rooms: rooms, Doors: doors, Enemies: enemies, Items: items}
+		keys := map[int]int{}
+		check := func(room int) {
+			rm := s.Room(room)
+			if rm.Kind == Stairs || rm.Num == s.FloorRooms(rm.Floor)[0].Num {
+				t.Fatalf("seed %d: key in room %d (%q)", seed, rm.Num, rm.Kind)
+			}
+			keys[rm.Floor]++
+		}
+		for _, it := range items {
+			if f := TokenFloor(it.Kind); f != 0 {
+				if s.Room(it.Room).Floor != f {
+					t.Fatalf("seed %d: %s on floor %d", seed, it.Kind, s.Room(it.Room).Floor)
+				}
+				check(it.Room)
+				if s.Room(it.Room).At(it.X, it.Y) != Floor {
+					t.Fatalf("seed %d: key in a wall", seed)
+				}
+			}
+		}
+		for _, e := range enemies {
+			if e.Key {
+				check(e.Room)
+			}
+		}
+		for f := 1; f <= Floors; f++ {
+			want, locked := 1, true
+			if f == Floors {
+				want, locked = 0, false // the boss's lair is open
+			}
+			if keys[f] != want {
+				t.Fatalf("seed %d: floor %d has %d tokens", seed, f, keys[f])
+			}
+			if s.FindKind(f, Stairs).Locked() != locked {
+				t.Fatalf("seed %d: floor %d stairs locked=%v", seed, f, !locked)
+			}
+		}
+	}
+}
