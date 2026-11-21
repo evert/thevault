@@ -16,6 +16,9 @@ It's one static Go binary and a SQLite file. There's no daemon: you get fresh
 energy every day at 3 AM ET (Toronto), and the world ticks whenever someone
 next runs the game.
 
+It has a 'motd' command that's intended to run after a user logs in so they can see
+the updated game state right away
+
 ## Try it locally
 
 ```sh
