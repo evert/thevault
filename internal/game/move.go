@@ -18,7 +18,14 @@ func canAct(s *world.State, p *world.Player) error {
 	return nil
 }
 
+// DevEnergy refills a player's energy whenever they run out. Only the local
+// dev build (`make build`) turns it on, never the server build.
+var DevEnergy bool
+
 func spend(s *world.State, p *world.Player, cost int) error {
+	if DevEnergy && p.Energy < cost {
+		p.Energy = world.MaxEnergy
+	}
 	if p.Energy < cost {
 		return oops("Out of energy. You get %d more at 3 AM ET (in %s).", world.EnergyPerTick, clock.Until(s.Now))
 	}

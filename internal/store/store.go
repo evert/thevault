@@ -24,7 +24,7 @@ import (
 
 // schemaVersion is bumped whenever the tables change. Versions before 2
 // predate the current game and are wiped; later ones are migrated.
-const schemaVersion = 4
+const schemaVersion = 5
 
 const schema = `
 CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -33,7 +33,7 @@ CREATE TABLE seasons (
 	started_at INTEGER NOT NULL, won_tick INTEGER NOT NULL DEFAULT 0, winner TEXT NOT NULL DEFAULT '');
 CREATE TABLE rooms (
 	season INTEGER NOT NULL, num INTEGER NOT NULL, revealed INTEGER NOT NULL, unlocked INTEGER NOT NULL DEFAULT 0,
-	PRIMARY KEY (season, num));
+	visited INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (season, num));
 CREATE TABLE enemies (
 	season INTEGER NOT NULL, id INTEGER NOT NULL, room INTEGER NOT NULL, x INTEGER NOT NULL, y INTEGER NOT NULL,
 	name TEXT NOT NULL, level INTEGER NOT NULL, hp INTEGER NOT NULL, max_hp INTEGER NOT NULL, atk INTEGER NOT NULL,
@@ -101,6 +101,9 @@ func migrate(tx *sql.Tx) error {
 			// start unlocked. New seasons write the column explicitly.
 			3: {`ALTER TABLE rooms ADD COLUMN unlocked INTEGER NOT NULL DEFAULT 1`,
 				`ALTER TABLE enemies ADD COLUMN key INTEGER NOT NULL DEFAULT 0`},
+			// 0 means "not known yet": the room's respawn timer starts on
+			// the first action after the upgrade.
+			4: {`ALTER TABLE rooms ADD COLUMN visited INTEGER NOT NULL DEFAULT 0`},
 		}
 		for ; v < schemaVersion; v++ {
 			for _, q := range steps[v] {
@@ -219,18 +222,27 @@ func Load(tx *sql.Tx, now time.Time) (*world.State, error) {
 		return nil, err
 	}
 	s.EnemySeq, _ = strconv.Atoi(seq)
+	bal, err := getMeta(tx, "balance")
+	if err != nil {
+		return nil, err
+	}
+	s.Balance, _ = strconv.Atoi(bal)
 
 	// The dungeon's shape comes from the seed; only what changes is stored.
 	s.Rooms, s.Doors, _, _ = world.Generate(s.Season.Seed)
 
-	if err := each(tx, `SELECT num, revealed, unlocked FROM rooms WHERE season = ?`, []any{sid}, func(rows *sql.Rows) error {
+	if err := each(tx, `SELECT num, revealed, unlocked, visited FROM rooms WHERE season = ?`, []any{sid}, func(rows *sql.Rows) error {
 		var num int
 		var rev, unlocked bool
-		if err := rows.Scan(&num, &rev, &unlocked); err != nil {
+		var visited int64
+		if err := rows.Scan(&num, &rev, &unlocked, &visited); err != nil {
 			return err
 		}
 		if rm := s.Room(num); rm != nil {
 			rm.Revealed, rm.Unlocked = rev, unlocked
+			if visited != 0 {
+				rm.Visited = time.Unix(visited, 0)
+			}
 		}
 		return nil
 	}); err != nil {
@@ -343,8 +355,13 @@ func Save(tx *sql.Tx, s *world.State) error {
 			return err
 		}
 	}
-	if err := insertAll(tx, `INSERT INTO rooms (season, num, revealed, unlocked) VALUES (?, ?, ?, ?)`, len(s.Rooms), func(i int) []any {
-		return []any{sid, s.Rooms[i].Num, b2i(s.Rooms[i].Revealed), b2i(s.Rooms[i].Unlocked)}
+	if err := insertAll(tx, `INSERT INTO rooms (season, num, revealed, unlocked, visited) VALUES (?, ?, ?, ?, ?)`, len(s.Rooms), func(i int) []any {
+		rm := s.Rooms[i]
+		var visited int64
+		if !rm.Visited.IsZero() {
+			visited = rm.Visited.Unix()
+		}
+		return []any{sid, rm.Num, b2i(rm.Revealed), b2i(rm.Unlocked), visited}
 	}); err != nil {
 		return err
 	}
@@ -384,6 +401,9 @@ func Save(tx *sql.Tx, s *world.State) error {
 		return err
 	}
 	if err := setMeta(tx, "enemy_seq", strconv.Itoa(s.EnemySeq)); err != nil {
+		return err
+	}
+	if err := setMeta(tx, "balance", strconv.Itoa(s.Balance)); err != nil {
 		return err
 	}
 	return setMeta(tx, "last_tick", strconv.FormatInt(s.LastTick.Unix(), 10))

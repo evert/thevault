@@ -10,19 +10,26 @@ var BossName = Boss.Name
 
 const BossLevel = 9
 
-func enemyStats(level int, boss bool) (hp, atk int) {
+// EnemyStats gives an enemy's max HP and attack. Below floor 1 enemies get
+// 10% more HP per floor and a little more bite.
+func EnemyStats(floor, level int, boss bool) (hp, atk int) {
 	hp, atk = 8+6*level, 1+3*level/2
 	if boss {
 		hp, atk = hp*4, atk*13/10
 	}
+	hp = hp * (10 + floor - 1) / 10
+	atk += floor / 2
 	return
 }
+
+// RoomEnemies is how many enemies a room starts (or refills) with.
+func RoomEnemies(r *rand.Rand) int { return 1 + r.IntN(2) }
 
 // NewEnemy makes an enemy for a floor.
 func NewEnemy(r *rand.Rand, id, floor int) *Enemy {
 	level := floor + r.IntN(2)
 	tier := Tiers[min(floor, Floors)-1]
-	hp, atk := enemyStats(level, false)
+	hp, atk := EnemyStats(floor, level, false)
 	return &Enemy{ID: id, Name: tier[r.IntN(len(tier))].Name, Level: level, HP: hp, MaxHP: hp, Atk: atk, Hitters: map[string]bool{}}
 }
 
@@ -62,12 +69,12 @@ func Generate(seed uint64) ([]*Room, []DoorLink, []*Enemy, []*Item) {
 			}
 			switch {
 			case floor == Floors && rm.Kind == Stairs:
-				hp, atk := enemyStats(BossLevel, true)
+				hp, atk := EnemyStats(floor, BossLevel, true)
 				x, y := place()
 				enemies = append(enemies, &Enemy{ID: len(enemies) + 1, Room: rm.Num, X: x, Y: y, Name: BossName,
 					Level: BossLevel, HP: hp, MaxHP: hp, Atk: atk, Boss: true, Hitters: map[string]bool{}})
 			case i > 0: // the first room on each floor starts calm
-				for range r.IntN(3) {
+				for range RoomEnemies(r) {
 					e := NewEnemy(r, len(enemies)+1, floor)
 					e.Room = rm.Num
 					e.X, e.Y = place()
@@ -381,14 +388,15 @@ func (s *State) NearTile(rm *Room, x, y int) (int, int) {
 	return s.FreeTile(rm)
 }
 
-// DropTile finds the nearest walkable tile to (x, y) with no package or
-// enemy on it, for dropping things.
+// DropTile finds the nearest walkable tile next to (x, y) with nobody and
+// nothing on it, for dropping things. It never picks (x, y) itself, so a
+// player's icon can't hide what they dropped.
 func (s *State) DropTile(rm *Room, x, y int) (int, int) {
-	for r := 0; r < RoomW; r++ {
+	for r := 1; r < RoomW; r++ {
 		for dy := -r; dy <= r; dy++ {
 			for dx := -r; dx <= r; dx++ {
 				nx, ny := x+dx, y+dy
-				if max(abs(dx), abs(dy)) == r && rm.At(nx, ny) == Floor &&
+				if max(abs(dx), abs(dy)) == r && rm.At(nx, ny) == Floor && len(s.playersAt(rm.Num, nx, ny)) == 0 &&
 					s.ItemAt(rm.Num, nx, ny) == nil && s.EnemyAt(rm.Num, nx, ny) == nil {
 					return nx, ny
 				}

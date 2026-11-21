@@ -79,6 +79,7 @@ type Room struct {
 	Kind     string
 	Revealed bool
 	Unlocked bool               // a stairs room stays locked until someone uses its token
+	Visited  time.Time          // last time a player was seen in it; zero if never
 	Tiles    [RoomH][RoomW]byte // generated from the seed, never stored
 }
 
@@ -204,6 +205,7 @@ type State struct {
 	Players map[string]*Player
 
 	EnemySeq   int     // last enemy ID handed out this season
+	Balance    int     // which game.BalanceVersion the world has been brought up to
 	Events     []Event // unsaved
 	FreshWorld bool    // the season row needs inserting
 }

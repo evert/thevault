@@ -84,6 +84,7 @@ func TestOlderWorldsStayUnlocked(t *testing.T) {
 	path, db := newWorld(t)
 	for _, q := range []string{
 		`ALTER TABLE rooms DROP COLUMN unlocked`,
+		`ALTER TABLE rooms DROP COLUMN visited`,
 		`ALTER TABLE enemies DROP COLUMN key`,
 		`PRAGMA user_version = 3`,
 	} {
@@ -100,6 +101,37 @@ func TestOlderWorldsStayUnlocked(t *testing.T) {
 	for _, rm := range load(t, db).Rooms {
 		if rm.Locked() {
 			t.Fatalf("room %d is locked in a world from before tokens", rm.Num)
+		}
+	}
+}
+
+// A world saved before rooms tracked visits upgrades in place, keeping its
+// enemies, and comes back as needing a rebalance.
+func TestWorldsFromBeforeRespawnUpgrade(t *testing.T) {
+	path, db := newWorld(t)
+	before := len(load(t, db).Enemies)
+	for _, q := range []string{
+		`ALTER TABLE rooms DROP COLUMN visited`,
+		`DELETE FROM meta WHERE key = 'balance'`,
+		`PRAGMA user_version = 4`,
+	} {
+		if _, err := db.W().Exec(q); err != nil {
+			t.Fatal(err)
+		}
+	}
+	db.Close()
+	db, err := store.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	s := load(t, db)
+	if len(s.Enemies) != before || s.Balance != 0 {
+		t.Fatalf("after upgrade: %d enemies (want %d), balance %d", len(s.Enemies), before, s.Balance)
+	}
+	for _, rm := range s.Rooms {
+		if !rm.Visited.IsZero() {
+			t.Fatalf("room %d has a visit time it never had", rm.Num)
 		}
 	}
 }

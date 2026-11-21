@@ -315,9 +315,8 @@ who lands a hit gets the XP.
 Packages (*): patch heals, rimraf blasts an enemy, cache gives energy.
 At 0 HP you're knocked out until 3 AM. Beat the boss on floor 5 to win.
 
-The stairs on floors 1-4 are behind a locked door (yellow). Each of those
-floors has an access token (⚷) lying in a room or carried by a monster:
-vlt_1, vlt_2, vlt_3 and vlt_op. Walk into the door holding it to open the
-way down for everyone. Get knocked out, or stay away for two days, and you
-drop it.
+Some doors are locked (yellow). Somewhere on the same floor is the access
+token (⚷) that opens it: lying in a room, or carried by a monster. Walk
+into the door holding it to open it for everyone. Get knocked out, or don't
+move for three days, and you drop it.
 `

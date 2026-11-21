@@ -42,6 +42,9 @@ func Act(db *store.DB, user string, act Action, view View) (Result, error) {
 			game.Start(s, game.NewSeed())
 		}
 		game.CatchUp(s, game.NewSeed)
+		game.Rebalance(s)
+		game.DropIdleKeys(s)
+		game.Respawn(s)
 		p := game.Join(s, user)
 		res = Result{State: s, Player: p}
 		if act != nil {
@@ -50,6 +53,7 @@ func Act(db *store.DB, user string, act Action, view View) (Result, error) {
 				return res.Oops
 			}
 		}
+		game.Visit(s)
 		if err := store.Save(tx, s); err != nil {
 			return err
 		}
@@ -74,7 +78,7 @@ func Peek(db *store.DB, user string, view View) (res Result, stale bool, err err
 			return err
 		}
 		p := s.Players[user]
-		if s.Season.ID == 0 || p == nil || clock.LatestBoundary(now).After(s.LastTick) {
+		if s.Season.ID == 0 || p == nil || clock.LatestBoundary(now).After(s.LastTick) || s.Balance < game.BalanceVersion {
 			stale = true
 			return nil
 		}

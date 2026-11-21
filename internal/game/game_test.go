@@ -86,6 +86,20 @@ func TestMoveCostsEnergyAndWallsAreFree(t *testing.T) {
 	}
 }
 
+func TestDevEnergyRefillsWhenEmpty(t *testing.T) {
+	DevEnergy = true
+	defer func() { DevEnergy = false }()
+	s := newState(1)
+	p := Join(s, "alice")
+	p.X, p.Y = world.RoomW/2, world.RoomH/2
+	s.Enemies = nil
+	s.Items = nil
+	p.Energy = 0
+	if _, err := Move(s, p, "right"); err != nil || p.Energy != world.MaxEnergy-1 {
+		t.Fatalf("dev move: err=%v energy=%d", err, p.Energy)
+	}
+}
+
 func TestDoorsLeadToTheNextRoom(t *testing.T) {
 	s := newState(3)
 	p := Join(s, "alice")
@@ -434,6 +448,12 @@ func TestKnockoutDropsToken(t *testing.T) {
 	if s.ItemAt(key.Room, key.X, key.Y) != key {
 		t.Fatal("dropped key isn't on the map")
 	}
+	if key.X == p.X && key.Y == p.Y {
+		t.Fatal("key dropped under the player, where their icon hides it")
+	}
+	if dx, dy := key.X-p.X, key.Y-p.Y; max(dx, -dx, dy, -dy) != 1 {
+		t.Fatalf("key dropped at %d,%d, not next to the player at %d,%d", key.X, key.Y, p.X, p.Y)
+	}
 }
 
 func TestIdlePlayerDropsToken(t *testing.T) {
@@ -442,14 +462,14 @@ func TestIdlePlayerDropsToken(t *testing.T) {
 	s.Items = append(s.Items,
 		&world.Item{ID: s.NextItemID(), Kind: "vlt_1", Holder: "alice"},
 		&world.Item{ID: s.NextItemID() + 1, Kind: "vlt_2", Holder: "bob"})
-	a.LastSeen = s.Now.Add(-3 * 24 * time.Hour)
-	b.LastSeen = s.Now
-	Tick(s, seq())
+	a.LastSeen = s.Now.Add(-KeyIdle)
+	b.LastSeen = s.Now.Add(-KeyIdle + time.Minute)
+	DropIdleKeys(s)
 	if s.Holding("alice", "vlt_1") != nil {
 		t.Fatal("alice kept her key while away")
 	}
 	if s.Holding("bob", "vlt_2") == nil {
-		t.Fatal("bob lost his key after playing today")
+		t.Fatal("bob lost his key a minute early")
 	}
 }
 

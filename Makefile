@@ -2,9 +2,10 @@
 
 GOBUILD = CGO_ENABLED=0 go build -trimpath
 
-# Local testing: saves to ./thevault-dev.db so you never touch the real world.
+# Local testing: saves to ./thevault-dev.db so you never touch the real world,
+# and refills your energy whenever it runs out.
 build:
-	$(GOBUILD) -ldflags="-s -w -X main.defaultDB=thevault-dev.db" -o thevault .
+	$(GOBUILD) -ldflags="-s -w -X main.defaultDB=thevault-dev.db -X main.devMode=1" -o thevault .
 
 # For the server: saves to /var/lib/thevault/thevault.db.
 release:

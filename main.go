@@ -13,6 +13,7 @@ import (
 	"golang.org/x/term"
 
 	"thevault/internal/app"
+	"thevault/internal/game"
 	"thevault/internal/render"
 	"thevault/internal/store"
 	"thevault/internal/tui"
@@ -23,8 +24,13 @@ import (
 // local test file; `make release` and plain `go build` keep the server path.
 var defaultDB = "/var/lib/thevault/thevault.db"
 
+// devMode is set by `make build` to turn on dev-only cheats. It's a build
+// flag rather than an env var so players on the server can't switch it on.
+var devMode = ""
+
 func main() {
 	setUmask()
+	game.DevEnergy = devMode != ""
 	args := os.Args[1:]
 	dbPath := os.Getenv("THEVAULT_DB")
 	if dbPath == "" {

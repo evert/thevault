@@ -14,9 +14,9 @@ import (
 // at world.MaxEnergy anyway.
 const MaxCatchUp = 7
 
-// KeyIdle is how long someone can be away before the tick takes their tokens
-// off them and leaves them where they stood.
-const KeyIdle = 48 * time.Hour
+// KeyIdle is how long someone can go without moving (or fighting, or using
+// an item) before their tokens are left where they stood.
+const KeyIdle = 72 * time.Hour
 
 // Oops is a player mistake: shown to them, but the transaction still commits.
 type Oops string
@@ -46,6 +46,7 @@ func NewSeason(s *world.State, id int, seed uint64) {
 	s.Season = world.Season{ID: id, Seed: seed, StartTick: s.Tick, StartedAt: s.Now}
 	s.Rooms, s.Doors, s.Enemies, s.Items = world.Generate(seed)
 	s.EnemySeq = len(s.Enemies)
+	s.Balance = BalanceVersion
 	s.FreshWorld = true
 	for _, u := range s.Users() {
 		p := s.Players[u]
@@ -132,6 +133,18 @@ func CatchUp(s *world.State, newSeed func() uint64) int {
 	return len(missed)
 }
 
+// DropIdleKeys makes anyone who hasn't moved in KeyIdle put down their
+// tokens, so nobody sits on one for days. It runs on every action, not just
+// the daily tick, so the drop happens right when the time is up.
+func DropIdleKeys(s *world.State) {
+	for _, u := range s.Users() {
+		p := s.Players[u]
+		if s.Now.Sub(p.LastSeen) >= KeyIdle && dropKeys(s, p) > 0 {
+			s.Emit(u, "key", fmt.Sprintf("%s hasn't moved in three days, so their token was left in room %d.", u, p.Room))
+		}
+	}
+}
+
 // Tick advances the world by one day.
 func Tick(s *world.State, newSeed func() uint64) {
 	s.Tick++
@@ -142,10 +155,6 @@ func Tick(s *world.State, newSeed func() uint64) {
 
 	for _, u := range s.Users() {
 		p := s.Players[u]
-		// Someone who's stopped playing shouldn't sit on a token for days.
-		if s.Now.Sub(p.LastSeen) > KeyIdle && dropKeys(s, p) > 0 {
-			s.Emit(u, "key", fmt.Sprintf("%s hasn't been around, so their token was left in room %d.", u, p.Room))
-		}
 		if p.KO {
 			ent := floorStart(s, s.Room(p.Room).Floor)
 			p.KO, p.Battle, p.Braced = false, 0, false
@@ -165,37 +174,6 @@ func Tick(s *world.State, newSeed func() uint64) {
 			regen = e.MaxHP / 10
 		}
 		e.HP = min(e.MaxHP, e.HP+regen)
-	}
-
-	respawn(s)
-}
-
-// respawn adds a couple of fresh enemies on each floor someone has reached,
-// in explored rooms nobody is standing in.
-func respawn(s *world.State) {
-	for floor := 1; floor <= world.Floors; floor++ {
-		var rooms []*world.Room
-		count := 0
-		for _, rm := range s.FloorRooms(floor) {
-			if rm.Revealed && len(s.PlayersIn(rm.Num)) == 0 && rm.Kind != world.Entrance {
-				rooms = append(rooms, rm)
-			}
-		}
-		for _, e := range s.Enemies {
-			if s.Room(e.Room).Floor == floor {
-				count++
-			}
-		}
-		if len(rooms) == 0 || count >= 2*len(s.FloorRooms(floor)) {
-			continue
-		}
-		for range 2 {
-			rm := rooms[s.Rng.IntN(len(rooms))]
-			e := world.NewEnemy(s.Rng, s.NextEnemyID(), floor)
-			e.Room = rm.Num
-			e.X, e.Y = s.FreeTile(rm)
-			s.Enemies = append(s.Enemies, e)
-		}
 	}
 }
 
